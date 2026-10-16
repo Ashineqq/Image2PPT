@@ -87,12 +87,60 @@ python scripts/build_deck.py \
 
 `convert.py` creates or uses a run directory, normalizes single-image or
 non-`page_NN` sources when needed, then calls the three lower-level
-steps. `prepare_ocr.py` loads PaddleOCR once, runs OCR across all pages, builds
+steps. `prepare_ocr.py` runs PP-OCRv5 across all pages (cloud service or
+in-process — see "OCR Backend" below), builds
 review packets for uncertain entries, and pre-fills `corrected_text`
 with local consensus picks. `ocr_review_apply.py` merges those picks into
 the OCR JSON files. `build_deck.py` runs erase, inventory extraction,
 layout generation, deck assembly, preview-based font-size calibration,
 preview-based text position calibration, QA inspection, and preview rendering.
+
+## OCR Backend
+
+Text recognition has two interchangeable backends; both emit the same JSON,
+so nothing downstream distinguishes them.
+
+- `remote` — submits the pages to the Baidu AI Studio PaddleOCR service
+  (`scripts/ocr/ocr_remote.py`). Same PP-OCRv5 model, no local weights, no
+  local CPU. All pages travel as ONE job (multi-page inputs are packed
+  into a single PDF), so the cost does not grow per page the way a local
+  loop does.
+- `local` — runs the `paddleocr` package in-process
+  (`scripts/ocr/ocr_paddle.py`). Needs a working `paddlepaddle` runtime;
+  fully offline.
+
+`--ocr-backend` defaults to `auto`: remote when a PaddleOCR token is
+configured, local otherwise. The token comes from `--ocr-token`, then
+`$PADDLE_OCR_TOKEN`, then `PADDLE_OCR_TOKEN` in `~/.editppt/config.yaml`.
+
+Do not set `--ocr-model` to a `PaddleOCR-VL-*` name: that model answers
+with layout blocks (one box per paragraph, multi-line text joined without
+separators) while the layout stage needs one box per text line.
+
+A user request to convert slide images authorizes the cloud OCR call
+required for the conversion, unless the user asks for local-only or
+confidential handling — then pass `--ocr-backend local`.
+
+## Table Backend
+
+`--detect-tables` verifies candidate table regions with the same two-way
+choice:
+
+- `remote` — the AI Studio **PP-StructureV3** service
+  (`scripts/tables/table_remote.py`). It detects the table, returns its
+  structure as HTML, and recognizes the cell text itself, so cells need
+  no OCR-to-cell matching and merges come back as rowspan/colspan.
+- `local` — PaddleX **SLANet_plus** (`scripts/tables/table_recognize.py`),
+  structure only; cell text is filled from the upstream OCR by bbox
+  containment.
+
+`--table-backend` defaults to `auto` and follows the same rule as OCR:
+remote when a PaddleOCR token is configured, local otherwise.
+
+`--table-score-threshold` (default 0.85) was calibrated against SLANet's
+structure score. The cloud backend has no equivalent structure score and
+reports the table block's layout confidence instead, so the two numbers
+are not the same measurement even though the gate still works.
 
 ## Optional Review
 

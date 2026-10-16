@@ -77,6 +77,11 @@ def parse_args() -> argparse.Namespace:
                    help="Forward --no-detect-tables to run_pipeline.")
     p.set_defaults(detect_tables=False)
     p.add_argument("--table-score-threshold", type=float, default=0.85)
+    p.add_argument("--table-backend", choices=["auto", "remote", "local"],
+                   default="auto",
+                   help="Forward --table-backend to run_pipeline: cloud "
+                        "PP-StructureV3 when a token is configured, else "
+                        "local SLANet_plus.")
     p.add_argument("--icon-review", action="store_true")
     p.add_argument("--icon-decisions", action="store_true")
     p.add_argument("--skip-pipeline", action="store_true",
@@ -147,6 +152,7 @@ def _process_page_worker(payload: dict) -> dict:
             num, Path(payload["src"]), Path(payload["work"]),
             detect_tables_flag=payload["detect_tables"],
             table_score_threshold=payload["table_score_threshold"],
+            table_backend=payload.get("table_backend", "auto"),
             icon_review_dump=payload["icon_review"],
             icon_decisions=payload["icon_decisions"],
         )
@@ -260,6 +266,7 @@ def main() -> int:
                 "mode": args.mode,
                 "detect_tables": args.detect_tables,
                 "table_score_threshold": args.table_score_threshold,
+                "table_backend": args.table_backend,
                 "icon_review": args.icon_review,
                 "icon_decisions": args.icon_decisions,
             } for n in nums]
@@ -292,6 +299,7 @@ def main() -> int:
                             n, src, work,
                             detect_tables_flag=args.detect_tables,
                             table_score_threshold=args.table_score_threshold,
+                            table_backend=args.table_backend,
                             icon_review_dump=args.icon_review,
                             icon_decisions=args.icon_decisions,
                         )

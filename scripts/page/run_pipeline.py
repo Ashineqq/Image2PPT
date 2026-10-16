@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections import Counter
@@ -109,8 +110,18 @@ def parse_args() -> argparse.Namespace:
     # `--detect-tables` only when the deck has literal grid tables.
     p.set_defaults(detect_tables=False)
     p.add_argument("--table-score-threshold", type=float, default=0.85,
-                   help="Minimum SLANet_plus structure confidence to "
-                        "accept a detected region as a table.")
+                   help="Minimum structure confidence to accept a detected "
+                        "region as a table. Note that the two backends "
+                        "measure this differently: local SLANet_plus "
+                        "reports a structure score, while the cloud "
+                        "backend reports the table block's layout "
+                        "confidence, so the default is not directly "
+                        "transferable between them.")
+    p.add_argument("--table-backend", choices=["auto", "remote", "local"],
+                   default="auto",
+                   help="Table recognizer. auto (default) uses the cloud "
+                        "PP-StructureV3 when a PaddleOCR token is "
+                        "configured, else local SLANet_plus.")
     p.add_argument("--icon-review", action="store_true",
                    help="Emit an LLM icon-review packet per page: "
                         "<work>/ocr/icon_review/page_NN/"
@@ -473,11 +484,41 @@ def _looks_like_ruled_table(src_path: Path,
         v_count >= min(2, max(1, cols - 1))
 
 
+def _table_recognizer(table_backend: str) -> tuple[Path, str, float]:
+    """Which recognizer script to shell out to, its label, and its timeout.
+
+    `auto` prefers the cloud: PP-StructureV3 both structures the table and
+    recognizes its cell text, so cells need no OCR-to-cell matching, and
+    the service reports merges the local SLANet path expresses less
+    reliably.
+    """
+    has_token = False
+    try:
+        sys.path.insert(0, str(SCRIPTS_ROOT / "ocr"))
+        import ocr_remote
+        has_token = bool(os.environ.get("PADDLE_OCR_TOKEN", "").strip()
+                         or ocr_remote.read_config_token())
+    except ImportError:
+        has_token = False
+    if table_backend == "local":
+        use_remote = False
+    elif table_backend == "remote":
+        use_remote = True
+    else:
+        use_remote = has_token
+    if use_remote:
+        # One cloud job per candidate region, plus queue time: the local
+        # SLANet call is ~0.1s, this is tens of seconds.
+        return SCRIPTS_ROOT / "tables" / "table_remote.py", "remote", 300.0
+    return SCRIPTS_ROOT / "tables" / "table_recognize.py", "local", 60.0
+
+
 def _detect_tables_for_page(num: str, src_path: Path, ocr: list[dict],
                             ocr_path: Path, work: Path,
-                            score_threshold: float) -> tuple[list[dict],
-                                                              set[int]]:
-    """Run the OCR grid detector + SLANet verification for this page.
+                            score_threshold: float,
+                            table_backend: str = "auto") -> tuple[list[dict],
+                                                                 set[int]]:
+    """Run the OCR grid detector + structure verification for this page.
 
     Returns (table_elements, consumed_ocr_indices) where:
       - table_elements are ready-to-merge `type: table` entries for the
@@ -488,9 +529,9 @@ def _detect_tables_for_page(num: str, src_path: Path, ocr: list[dict],
         native table.
 
     The detection step is intentionally conservative — see detect_tables
-    and the SLANet score gate. If anything fails (paddlex unavailable,
-    SLANet errors), we log to stderr and return empty results so the
-    rest of the pipeline keeps producing the previous output.
+    and the recognizer score gate. If anything fails (recognizer
+    unavailable, it errors), we log to stderr and return empty results so
+    the rest of the pipeline keeps producing the previous output.
     """
     candidates = dt.detect(
         ocr, min_rows=3, min_cols=2,
@@ -508,6 +549,7 @@ def _detect_tables_for_page(num: str, src_path: Path, ocr: list[dict],
     accepted_cell_bboxes: list[tuple[int, int, int, int]] = []
     table_elements: list[dict] = []
     tables_path = work / "ocr" / f"page_{num}.table.json"
+    recognizer, backend_label, timeout = _table_recognizer(table_backend)
     for idx, cand in enumerate(candidates):
         x1, y1, x2, y2 = cand["bbox"]
         if not _looks_like_ruled_table(
@@ -520,15 +562,15 @@ def _detect_tables_for_page(num: str, src_path: Path, ocr: list[dict],
         try:
             r = subprocess.run([
                 sys.executable,
-                str(SCRIPTS_ROOT / "tables" / "table_recognize.py"),
+                str(recognizer),
                 str(src_path),
                 "--bbox", f"{x1},{y1},{x2},{y2}",
                 "--ocr", str(ocr_path),
                 "--out", str(out_path),
-            ], capture_output=True, timeout=60)
+            ], capture_output=True, timeout=timeout)
         except (subprocess.SubprocessError, OSError) as exc:
-            print(f"page {num}: table_recognize failed ({exc})",
-                  file=sys.stderr)
+            print(f"page {num}: {recognizer.name} ({backend_label}) "
+                  f"failed ({exc})", file=sys.stderr)
             continue
         if r.returncode != 0 or not out_path.exists():
             continue
@@ -746,6 +788,7 @@ def _erase_table_regions(clean_path: Path,
 def process_page(num: str, src_dir: Path, work: Path,
                  *, detect_tables_flag: bool = False,
                  table_score_threshold: float = 0.85,
+                 table_backend: str = "auto",
                  icon_review_dump: bool = False,
                  icon_decisions: bool = False) -> dict:
     """Erase → inventory → layout for one page.
@@ -786,6 +829,7 @@ def process_page(num: str, src_dir: Path, work: Path,
     if detect_tables_flag:
         table_layout_elements, table_consumed = _detect_tables_for_page(
             num, src_path, ocr, ocr_path, work, table_score_threshold,
+            table_backend,
         )
 
     # ---- optional: icon-review overrides ----
@@ -948,6 +992,7 @@ def main() -> None:
                 n, src_dir, work,
                 detect_tables_flag=args.detect_tables,
                 table_score_threshold=args.table_score_threshold,
+                table_backend=args.table_backend,
                 icon_review_dump=args.icon_review,
                 icon_decisions=args.icon_decisions,
             )

@@ -11,6 +11,13 @@ from pathlib import Path
 
 _FONTCONFIG_ENV: dict[str, str] | None = None
 
+# Fontconfig configs to hang our override off, most specific first.
+_SYSTEM_FONTCONFIG = (
+    Path("/opt/homebrew/etc/fonts/fonts.conf"),
+    Path("/usr/local/etc/fonts/fonts.conf"),
+    Path("/etc/fonts/fonts.conf"),
+)
+
 
 def _office_yahei_dirs() -> list[Path]:
     roots = [
@@ -30,27 +37,53 @@ def _office_yahei_dirs() -> list[Path]:
     return out
 
 
+def _include_target(base: dict[str, str]) -> Path | None:
+    """Which fontconfig to include: the caller's own if it already set
+    one, else this platform's system config."""
+    existing = base.get("FONTCONFIG_FILE")
+    if existing and Path(existing).exists():
+        return Path(existing)
+    for candidate in _SYSTEM_FONTCONFIG:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def fontconfig_env(base: dict[str, str] | None = None) -> dict[str, str]:
-    """Return an env where Office's YaHei TTCs are visible to fontconfig."""
+    """Return an env that gives fontconfig the fonts LibreOffice cannot
+    find on its own.
+
+    Two reasons this exists:
+
+    * Office's YaHei TTCs live inside the app bundle and are invisible to
+      fontconfig unless their directory is added.
+    * LibreOffice only falls back through fontconfig when it is told to.
+      Pointing FONTCONFIG_FILE at a config that includes the system one
+      is what keeps CJK text from rendering as tofu on machines where
+      those system fonts are the only CJK faces available. Skipping this
+      when Office is absent was the old behaviour, and it turned every
+      CJK run into empty boxes.
+    """
     global _FONTCONFIG_ENV
     env = dict(base or os.environ)
-    dirs = _office_yahei_dirs()
-    if not dirs:
-        return env
     if _FONTCONFIG_ENV is None:
-        conf_path = Path(tempfile.gettempdir()) / "image2ppt-fonts.conf"
-        dir_xml = "\n".join(f"  <dir>{d}</dir>" for d in dirs)
-        conf_path.write_text(
-            "<?xml version=\"1.0\"?>\n"
-            "<!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n"
-            "<fontconfig>\n"
-            "  <include ignore_missing=\"yes\">"
-            "/opt/homebrew/etc/fonts/fonts.conf</include>\n"
-            f"{dir_xml}\n"
-            "</fontconfig>\n",
-            encoding="utf-8",
-        )
-        _FONTCONFIG_ENV = {"FONTCONFIG_FILE": str(conf_path)}
+        include = _include_target(env)
+        dirs = _office_yahei_dirs()
+        if include is None and not dirs:
+            # Nothing to point fontconfig at; leave the environment alone.
+            _FONTCONFIG_ENV = {}
+        else:
+            conf_path = Path(tempfile.gettempdir()) / "image2ppt-fonts.conf"
+            parts = ["<?xml version=\"1.0\"?>",
+                     "<!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">",
+                     "<fontconfig>"]
+            if include is not None:
+                parts.append(f"  <include ignore_missing=\"yes\">{include}"
+                             f"</include>")
+            parts.extend(f"  <dir>{d}</dir>" for d in dirs)
+            parts.append("</fontconfig>")
+            conf_path.write_text("\n".join(parts) + "\n", encoding="utf-8")
+            _FONTCONFIG_ENV = {"FONTCONFIG_FILE": str(conf_path)}
     env.update(_FONTCONFIG_ENV)
     return env
 

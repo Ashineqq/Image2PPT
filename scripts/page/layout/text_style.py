@@ -111,6 +111,24 @@ def detect_text_style(bbox: list[int], orig_img: np.ndarray,
     # Pixels within bbox far from bg are text strokes.
     diff = np.abs(region.astype(int) - bg).max(axis=2)
     text_mask = diff > 35
+    # A fill counted as ink is a dense mask: 0.83+ of the bbox across the
+    # sample slides, where the densest real glyph mask (bold CJK packed on a
+    # filled chip) is 0.63. Two ways to get there:
+    #   * the saturation test above found no container, but the bbox still
+    #     sits on an unsaturated chip, so the ring sampled the page outside it;
+    #   * the saturation test did fire but locked onto the text itself rather
+    #     than a fill (saturated text on a pale chip), which is always dense.
+    # Either way, adopt the mask's own median as the backdrop and re-threshold.
+    density = float(text_mask.mean())
+    if int(text_mask.sum()) >= 8 and (
+            density > 0.75
+            or (not is_container_like and density > 0.60)):
+        chip_bg = np.median(region[text_mask], axis=0)
+        if int(np.max(np.abs(
+                chip_bg.astype(int) - bg.astype(int)))) > 40:
+            bg = chip_bg
+            diff = np.abs(region.astype(int) - bg).max(axis=2)
+            text_mask = diff > 35
     if int(text_mask.sum()) < 5:
         # Fallback: take darkest 25 % vs bg.
         thr = max(15, int(np.percentile(diff, 75)))

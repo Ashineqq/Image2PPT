@@ -12,9 +12,12 @@ slides_private/
 input/
 output/
 tmp/
+# Demo inputs used while validating the cloud backends
+slides_two/
 
 # Python environments and caches
 .venv/
+.venv*/
 venv/
 __pycache__/
 *.py[cod]

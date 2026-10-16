@@ -74,6 +74,12 @@ def parse_args() -> argparse.Namespace:
         help="Minimum table-structure confidence when --detect-tables is set.",
     )
     p.add_argument(
+        "--table-backend", choices=["auto", "remote", "local"], default="auto",
+        help="Table recognizer for --detect-tables. auto (default) uses the "
+             "cloud PP-StructureV3 when a token is configured, else local "
+             "SLANet_plus.",
+    )
+    p.add_argument(
         "--icon-review", action="store_true",
         help="Emit icon-vs-text review packets.",
     )
@@ -84,6 +90,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--ocr-threshold", type=float, default=0.95,
         help="Paddle confidence threshold for OCR review queueing.",
+    )
+    p.add_argument(
+        "--ocr-backend", choices=["auto", "remote", "local"], default="auto",
+        help="Recognizer for the OCR stage. auto (default) uses the Baidu "
+             "AI Studio cloud service when a token is available, else the "
+             "local paddleocr package.",
+    )
+    p.add_argument(
+        "--ocr-token", default=None,
+        help="PaddleOCR cloud token; defaults to $PADDLE_OCR_TOKEN then "
+             "~/.editppt/config.yaml.",
+    )
+    p.add_argument(
+        "--ocr-model", default=None,
+        help="Cloud model name (default PP-OCRv5).",
+    )
+    p.add_argument(
+        "--remote-crop-rescue", action="store_true",
+        help="Allow the 4th-engine crop rescue on the cloud backend "
+             "(one job per red entry).",
     )
     p.add_argument(
         "--max-review-entries", type=int, default=50,
@@ -213,6 +239,14 @@ def main() -> int:
         prepare_cmd += ["--pages", args.pages]
     if args.skip_cross_verify:
         prepare_cmd.append("--skip-cross-verify")
+    if args.ocr_backend != "auto":
+        prepare_cmd += ["--ocr-backend", args.ocr_backend]
+    if args.ocr_token:
+        prepare_cmd += ["--ocr-token", args.ocr_token]
+    if args.ocr_model:
+        prepare_cmd += ["--ocr-model", args.ocr_model]
+    if args.remote_crop_rescue:
+        prepare_cmd.append("--remote-crop-rescue")
 
     apply_cmd = [
         sys.executable, str(SCRIPTS_ROOT / "ocr" / "ocr_review_apply.py"),
@@ -229,6 +263,8 @@ def main() -> int:
         build_cmd += ["--pages", args.pages]
     if args.detect_tables:
         build_cmd.append("--detect-tables")
+    if args.table_backend != "auto":
+        build_cmd += ["--table-backend", args.table_backend]
     if args.icon_review:
         build_cmd.append("--icon-review")
     if args.icon_decisions:

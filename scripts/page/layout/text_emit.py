@@ -39,6 +39,13 @@ from layout.text_style import detect_text_style
 # similar pairs (Helvetica/Arial, SimSun/Songti) where the heuristic default
 # is at least as safe.
 _FONT_CONF_THRESHOLD = 0.60
+# Bold is its own classifier head and does not inherit the family head's
+# uncertainty. Over the sample slides the head separates cleanly — regular
+# text samples below 0.05, bold above 0.21 — so 0.15 sits in that empty gap
+# instead of at the model's nominal 0.5, which would misroute medium-weight
+# source text. The stroke-width heuristic it replaces compares an absolute
+# half-width against 1.2 px, so it reads small bold text as regular.
+_BOLD_CONF_THRESHOLD = 0.15
 from layout.text_units import (
     _derive_source_char_boxes,
     _estimated_runs_width_px,
@@ -128,13 +135,20 @@ def _emit_text_element_record(
     ppt_font = default_ppt_font()
     text_bold = bool(style["bold"])
     text_italic = False
-    # ML font classifier (ResNet-34 INT8 ONNX). Only override the heuristic
-    # font/bold/italic when the prediction is confident enough; otherwise the
-    # downstream render_fit + heuristic path stays in charge.
+    # ML font classifier (ResNet-34 INT8 ONNX). The family head is only
+    # trusted when confident — visually similar families make a low-confidence
+    # guess worse than the heuristic default.
     if font_pred is not None and font_pred["family_confidence"] >= _FONT_CONF_THRESHOLD:
         ppt_font = font_pred["family"]
-        text_bold = bool(font_pred["is_bold"])
         text_italic = bool(font_pred["is_italic"])
+    # Bold has its own head, so it is decided on its own confidence rather
+    # than being discarded along with an unsure family prediction. Its verdict
+    # is then held against render_fit below, which would otherwise re-decide
+    # the weight from substitute-font stroke coverage.
+    bold_from_classifier = False
+    if font_pred is not None and font_pred.get("bold_confidence") is not None:
+        text_bold = float(font_pred["bold_confidence"]) >= _BOLD_CONF_THRESHOLD
+        bold_from_classifier = True
     run_sized = any(r.get("size") is not None
                     for r in style.get("runs", []))
     compact_text = "".join(c for c in safe_text if not c.isspace())
@@ -154,6 +168,7 @@ def _emit_text_element_record(
             initial_bold=text_bold,
             initial_font=ppt_font,
             pt_per_px=pt_per_px,
+            lock_bold=bold_from_classifier,
         )
         if render_fit is not None:
             size = int(render_fit["size"])

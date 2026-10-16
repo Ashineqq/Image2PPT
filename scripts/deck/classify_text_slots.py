@@ -19,6 +19,18 @@ from typing import Any
 MAX_STYLE_SIZE_DELTA = 2.0
 
 
+def _classifier_set_bold(el: dict[str, Any]) -> bool:
+    """True when the ML font head already decided this element's weight.
+
+    Slot classes normalise weight by dominant value so that a noisy
+    stroke-density heuristic cannot leave one bullet bold and its siblings
+    regular. The classifier head is not noisy that way, so its verdicts are
+    left alone — the class-level dominant would otherwise flatten real
+    differences between a bold title and its regular sub-label.
+    """
+    return (el.get("font_pred") or {}).get("bold_confidence") is not None
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--layout", required=True, help="Combined layout JSON.")
@@ -917,9 +929,11 @@ def _run_slot_classes(texts: list[dict[str, Any]],
             and (force_apply or len(entries) >= min_apply_size)
             and bold_stable_or_outlier
         ):
-            for _el, run, _idx in entries:
+            for el, run, _idx in entries:
+                if _classifier_set_bold(el):
+                    continue
                 run["bold"] = dominant_bold
-            applied_bold = True
+                applied_bold = True
         out.append({
             "role": role,
             "count": len(entries),
@@ -1667,8 +1681,11 @@ def classify_slide(slide: dict[str, Any],
                 and bold_stable_or_outlier
             ):
                 for i in members:
-                    texts[i]["el"]["bold"] = dominant_bold
-                applied_bold = True
+                    el = texts[i]["el"]
+                    if _classifier_set_bold(el):
+                        continue
+                    el["bold"] = dominant_bold
+                    applied_bold = True
         run_classes = _run_slot_classes(
             texts, members, class_id, apply, min_apply_size, force_apply)
         class_position_alignment = (

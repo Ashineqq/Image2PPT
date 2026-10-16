@@ -1,8 +1,15 @@
 #!/usr/bin/env python
-"""PaddleOCR PP-OCRv5 wrapper — single-page or batch.
+"""PaddleOCR PP-OCRv5 wrapper — single-page or batch (LOCAL backend).
 
-This is the ONLY OCR backend in the skill. It reads slide images and
-emits axis-aligned text bboxes in source-image pixel coordinates as a
+`ocr_remote.py` is the cloud twin: same models, same output contract, but
+the det+rec run on Baidu AI Studio instead of in-process. Prefer it when
+you don't want the ~85 MB of local PaddleX weights or their per-page CPU
+cost; `prepare_ocr.py --ocr-backend auto` picks it when a token exists.
+This module is the backend that runs when OCR has to stay on the machine,
+and it also provides the helpers the review step imports.
+
+This is the ONLY local OCR backend in the skill. It reads slide images
+and emits axis-aligned text bboxes in source-image pixel coordinates as a
 JSON list of `{text, x1, y1, x2, y2, confidence}` objects. Downstream
 `erase_text.py`, `build_inventory.py`, `inventory_to_layout.py` consume
 this shape.
@@ -17,8 +24,12 @@ Batch mode (reuses ONE warm PaddleOCR model across all pages — the
         page_02.webp out/page_02.ocr.json \
         ...
 
-PaddleOCR-VL 1.5 was evaluated and rejected: 80s+ per page on CPU,
-only worth it with GPU acceleration.
+PaddleOCR-VL 1.5 was evaluated and rejected for LOCAL inference: 80s+ per
+page on CPU, only worth it with GPU acceleration. Note that the cloud
+service exposes PaddleOCR-VL as well, but its answer is one box per
+LAYOUT BLOCK (a multi-line paragraph comes back as a single box with the
+lines joined and no separators), which the layout stage cannot consume —
+stick to PP-OCRv5 there.
 """
 from __future__ import annotations
 

@@ -103,11 +103,20 @@ def unify_group_sizes(text_records: list[dict]) -> list[dict]:
         if len(bucket) < 2:
             continue
 
-        # Bold majority vote.
-        bold_votes = sum(1 for i in bucket if out[i]["bold"])
-        unified_bold = bool(bold_votes * 2 >= len(bucket))
-        for i in bucket:
-            out[i]["bold"] = unified_bold
+        # Bold majority vote, restricted to records the ML font head did not
+        # cover. The vote exists to denoise the stroke-density heuristic, and
+        # voting over classifier verdicts erases real per-line weight
+        # differences: a bold card title and its regular sub-label share
+        # colour, height and category, so they land in the same bucket.
+        votable = [
+            i for i in bucket
+            if (out[i].get("font_pred") or {}).get("bold_confidence") is None
+        ]
+        if len(votable) >= 2:
+            bold_votes = sum(1 for i in votable if out[i]["bold"])
+            unified_bold = bool(bold_votes * 2 >= len(votable))
+            for i in votable:
+                out[i]["bold"] = unified_bold
 
         # Font family + italic propagation. Only fire when the bucket has
         # at least one confidently-predicted member: that anchor's family

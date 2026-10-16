@@ -53,6 +53,7 @@ def fit_text_render(
     initial_bold: bool,
     initial_font: str,
     pt_per_px: float,
+    lock_bold: bool = False,
 ) -> dict | None:
     """Choose font/size/position by comparing render masks to source ink."""
     if not text or "\n" in text:
@@ -69,7 +70,11 @@ def fit_text_render(
 
     best: dict | None = None
     bold_options = [bool(initial_bold)]
-    if text.strip() and len(text.strip()) <= 40:
+    # A weight that came from the font classifier is trusted: the fitter
+    # scores ink coverage through whatever substitute face fontconfig offers
+    # for the requested family, and a substitute whose strokes run lighter
+    # than the source's real font is enough to flip regular text to bold.
+    if not lock_bold and text.strip() and len(text.strip()) <= 40:
         bold_options.append(not bool(initial_bold))
 
     for font_idx, font in enumerate(fonts):

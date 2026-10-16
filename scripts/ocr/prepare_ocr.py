@@ -1,14 +1,20 @@
 #!/usr/bin/env python
 """Single-command OCR preparation with 3-engine cross-verification.
 
-Loads PaddleOCR once and walks every supported `page_NN.*` image in
---source-dir. For
+Runs PP-OCRv5 over every supported `page_NN.*` image in --source-dir.
+The recognizer is either the Baidu AI Studio cloud service (`--ocr-backend
+remote`, no local Paddle install, all pages in one job) or the local
+paddleocr package (`--ocr-backend local`); both emit the same JSON shape,
+so nothing downstream changes. `auto` (the default) picks remote whenever
+a PaddleOCR token is available. For
 each page:
 
-  1. Runs PaddleOCR (PP-OCRv5) to get baseline text + bbox + confidence
+  1. Runs PP-OCRv5 to get baseline text + bbox + confidence
   2. Builds a review packet for entries with conf < --threshold (default 0.95)
   3. For each review entry, runs EasyOCR + Tesseract 5 on the cropped
-     region and assigns a 3-engine consensus tier:
+     region and assigns a 3-engine consensus tier (the optional 4th-engine
+     Paddle crop rescue needs a local model, or --remote-crop-rescue to
+     spend one cloud job per red entry):
        🟢 green  — strong (3/3 or 2/3 agree)
        🟡 yellow — weak  (small edit-distance differences, OR one
                           engine confidence ≥ 0.95, OR strongest
@@ -49,18 +55,25 @@ Usage:
 
 Optional flags:
     --pages 1,4,8         only process specified page numbers
-    --threshold 0.95      Paddle conf threshold for queueing review
+    --ocr-backend auto    auto | remote (AI Studio cloud) | local (paddleocr)
+    --ocr-token TOKEN     cloud token; defaults to $PADDLE_OCR_TOKEN then
+                          ~/.editppt/config.yaml
+    --ocr-model PP-OCRv5  cloud model name
+    --threshold 0.95      PP-OCRv5 conf threshold for queueing review
     --max-entries 50      cap on review entries per page
     --image-size WxH      slide size used by autoclear (default 1280x720)
     --high-conf 0.95      single-engine threshold for D' rule
     --moderate-conf 0.85  single-engine threshold for G fallback rule
     --skip-cross-verify   skip 3-engine pass (review tier always "red")
     --skip-autoclear      skip the autoclear pass
+    --remote-crop-rescue  allow the 4th-engine crop rescue to spend one
+                          cloud job per red entry (remote backend only)
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -75,6 +88,7 @@ sys.path.insert(0, str(SCRIPTS_ROOT))
 from image_sources import (  # noqa: E402
     discover_page_numbers, find_page_image, supported_image_formats,
 )
+import ocr_remote  # noqa: E402
 from ocr_paddle import extract_items, quiet_paddle  # noqa: E402
 from ocr_review_autoclear import match_rule, parse_size  # noqa: E402
 from ocr_cross_verify import (  # noqa: E402
@@ -84,6 +98,11 @@ from ocr_cross_verify import (  # noqa: E402
 from render_annotated_review import render_annotated_page  # noqa: E402
 from shared.gpu import paddle_device  # noqa: E402
 
+
+# Crop-rescue upscaling rule, kept in step with
+# `ocr_cross_verify.run_paddle_crop`'s defaults.
+REMOTE_RESCUE_UPSCALE_WIDTH = 200
+REMOTE_RESCUE_UPSCALE_FACTOR = 3
 
 REVIEW_INSTRUCTIONS = (
     "Each entry's `corrected_text` has been pre-filled with the 3-engine "
@@ -112,6 +131,25 @@ def parse_args() -> argparse.Namespace:
                         "Default: every supported page_* image in "
                         "--source-dir.")
     p.add_argument("--lang", default="ch", help="PaddleOCR lang (default ch).")
+    p.add_argument("--ocr-backend", choices=["auto", "remote", "local"],
+                   default="auto",
+                   help="Recognizer to use. auto (default) = the AI Studio "
+                        "cloud service when a token is available, else the "
+                        "local paddleocr package. remote = cloud only; "
+                        "local = paddleocr only.")
+    p.add_argument("--ocr-token", default=None,
+                   help="PaddleOCR cloud token; defaults to "
+                        "$PADDLE_OCR_TOKEN, then ~/.editppt/config.yaml.")
+    p.add_argument("--ocr-model", default=ocr_remote.DEFAULT_MODEL,
+                   help=f"Cloud model name (default {ocr_remote.DEFAULT_MODEL}).")
+    p.add_argument("--ocr-timeout", type=float,
+                   default=ocr_remote.DEFAULT_TIMEOUT,
+                   help="Cloud job polling timeout in seconds.")
+    p.add_argument("--remote-crop-rescue", action="store_true",
+                   help="Let the 4th-engine crop rescue run on the cloud "
+                        "backend (one job per red entry — slow). Off by "
+                        "default; the local backend always rescues "
+                        "in-process.")
     p.add_argument("--min-conf", type=float, default=0.5,
                    help="Minimum Paddle confidence to emit (default 0.5).")
     p.add_argument("--threshold", type=float, default=0.95,
@@ -145,6 +183,60 @@ def discover_pages(src_dir: Path, pages_arg: str | None) -> list[str]:
     return discover_page_numbers(src_dir)
 
 
+def resolve_backend(args: argparse.Namespace) -> str:
+    """Pick the recognizer: auto prefers the cloud when a token exists."""
+    if args.ocr_backend == "local":
+        return "local"
+    if args.ocr_backend == "remote":
+        return "remote"
+    if (args.ocr_token or os.environ.get("PADDLE_OCR_TOKEN")
+            or ocr_remote.read_config_token()):
+        return "remote"
+    return "local"
+
+
+def remote_token(args: argparse.Namespace) -> str:
+    try:
+        return ocr_remote.resolve_token(args.ocr_token)
+    except ocr_remote.RemoteOCRError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def run_ocr_remote(pairs: list[tuple[Path, Path]], args: argparse.Namespace,
+                   token: str) -> list[int]:
+    """OCR every page through ONE cloud job; return per-page item counts.
+
+    Pages are packed into a multi-page PDF and uploaded together, so the
+    per-page cost is upload-plus-poll once, not once per page.
+    """
+    counts = [0] * len(pairs)
+    todo = [(i, img, out) for i, (img, out) in enumerate(pairs)
+            if img.exists()]
+    for img, _ in pairs:
+        if not img.exists():
+            print(f"  SKIP missing: {img}", file=sys.stderr)
+    if not todo:
+        return counts
+    print(f"  submitting {len(todo)} page(s) to {args.ocr_model} "
+          f"in one job", flush=True)
+    try:
+        results = ocr_remote.run_pages(
+            [img for _, img, _ in todo], token=token, model=args.ocr_model,
+            min_conf=args.min_conf, timeout=args.ocr_timeout,
+        )
+    except ocr_remote.RemoteOCRError as exc:
+        print(f"ERROR: remote OCR failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    for (i, img, out), items in zip(todo, results):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(items, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        counts[i] = len(items)
+        print(f"  {img.name} -> {len(items)} items", flush=True)
+    return counts
+
+
 def run_ocr_batch(ocr, pairs: list[tuple[Path, Path]],
                   min_conf: float) -> list[int]:
     """Run PaddleOCR.predict on each (src, out_json) pair; return per-page
@@ -174,12 +266,46 @@ def run_ocr_batch(ocr, pairs: list[tuple[Path, Path]],
     return counts
 
 
+def make_remote_rescuer(args: argparse.Namespace, token: str):
+    """Build the 4th-engine crop-rescue callable for the cloud backend.
+
+    Mirrors `ocr_cross_verify.run_paddle_crop` — including its
+    width-based upscaling rule, so both backends ask for more pixels per
+    character on the same crops. Each call is one cloud job, which is
+    why this stays behind --remote-crop-rescue.
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    from ocr_cross_verify import EnginePred  # noqa: PLC0415
+
+    def rescuer(crop_image) -> EnginePred:
+        try:
+            if crop_image.width >= REMOTE_RESCUE_UPSCALE_WIDTH:
+                img = crop_image.resize(
+                    (crop_image.width * REMOTE_RESCUE_UPSCALE_FACTOR,
+                     crop_image.height * REMOTE_RESCUE_UPSCALE_FACTOR),
+                    Image.LANCZOS,
+                )
+            else:
+                img = crop_image
+            text, conf = ocr_remote.run_crop(
+                img, token=token, model=args.ocr_model,
+                timeout=args.ocr_timeout,
+            )
+            return EnginePred(text, conf)
+        except Exception:
+            return EnginePred("", 0.0)
+
+    return rescuer
+
+
 def build_review_packet(ocr_path: Path, image_path: Path, *,
                         out_path: Path, threshold: float,
                         padding: int, max_entries: int,
                         high_conf: float, moderate_conf: float,
                         do_cross_verify: bool,
-                        paddle_model=None) -> dict:
+                        paddle_model=None,
+                        remote_rescuer=None) -> dict:
     """Run 3-engine cross-verify on low-confidence Paddle entries and
     write the review packet.
 
@@ -243,13 +369,19 @@ def build_review_packet(ocr_path: Path, image_path: Path, *,
                                   moderate_conf=moderate_conf)
                 # 4th-engine rescue: only on RED entries (the only
                 # case where it can change the outcome), and only if
-                # the caller passed us a warm Paddle model. Re-runs
-                # Paddle on the isolated crop with width-based
-                # upscaling — empirically this corrects ~30-50% of
-                # dense-CJK RED entries.
-                if xv.tier == "red" and paddle_model is not None:
+                # the caller supplied a recognizer — a warm local
+                # Paddle model, or `remote_rescuer` for the cloud
+                # backend. Re-runs the recognizer on the isolated crop
+                # with width-based upscaling — empirically this
+                # corrects ~30-50% of dense-CJK RED entries.
+                if xv.tier == "red" and (paddle_model is not None
+                                         or remote_rescuer is not None):
                     rescue_stats["attempted"] += 1
-                    paddle_crop_pred = run_paddle_crop(crop_img, paddle_model)
+                    if paddle_model is not None:
+                        paddle_crop_pred = run_paddle_crop(crop_img,
+                                                           paddle_model)
+                    else:
+                        paddle_crop_pred = remote_rescuer(crop_img)
                     xv_after = paddle_crop_rescue(
                         xv, paddle_crop_pred, moderate_conf=moderate_conf,
                     )
@@ -354,34 +486,55 @@ def main() -> int:
 
     image_w, image_h = parse_size(args.image_size)
 
-    # ---- Stage 1: PaddleOCR (warm model, all pages) ----
-    quiet_paddle()
-    try:
-        from paddleocr import PaddleOCR
-    except ImportError:
-        print("ERROR: paddleocr not installed. Run: "
-              "pip install 'paddleocr>=3' 'paddlex[ocr]'",
-              file=sys.stderr)
-        return 1
+    # ---- Stage 1: OCR (cloud job, or a warm local model) ----
+    backend = resolve_backend(args)
+    token = remote_token(args) if backend == "remote" else ""
+    ocr = None
+    device = None
+    if backend == "local":
+        quiet_paddle()
+        try:
+            from paddleocr import PaddleOCR
+        except ImportError:
+            print("ERROR: paddleocr is not installed and no cloud token is "
+                  "configured. Run `pip install 'paddleocr>=3' "
+                  "'paddlex[ocr]'`, or use the remote backend by passing "
+                  "--ocr-token / setting PADDLE_OCR_TOKEN.",
+                  file=sys.stderr)
+            return 1
+        device = paddle_device()
 
-    device = paddle_device()
-    print(f"\n=== Stage 1: PaddleOCR ({len(nums)} pages, warm model, "
-          f"device={device}) ===", flush=True)
+    print(f"\n=== Stage 1: OCR ({len(nums)} pages, backend={backend}"
+          f"{f', device={device}' if device else ''}) ===", flush=True)
     t0 = time.time()
-    ocr = PaddleOCR(
-        lang=args.lang,
-        device=device,
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=False,
-        # Emit per-character bboxes so inventory_to_layout.py can do
-        # per-character color sampling (in-bbox color changes).
-        return_word_box=True,
-    )
     pairs = [(image_paths[n], ocr_dir / f"page_{n}.ocr.json")
              for n in nums]
-    counts = run_ocr_batch(ocr, pairs, args.min_conf)
-    print(f"  PaddleOCR done in {time.time() - t0:.1f}s "
+    if backend == "remote":
+        counts = run_ocr_remote(pairs, args, token)
+    else:
+        try:
+            ocr = PaddleOCR(
+                lang=args.lang,
+                device=device,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                # Emit per-character bboxes so inventory_to_layout.py can
+                # do per-character color sampling (in-bbox color changes).
+                return_word_box=True,
+            )
+        except Exception as exc:
+            print(f"ERROR: could not start the local PaddleOCR engine: {exc}\n"
+                  f"  The local backend needs the `paddlepaddle` runtime "
+                  f"(pip install paddlepaddle) or a GPU build.\n"
+                  f"  Easiest fix: run the cloud backend instead — pass "
+                  f"--ocr-backend remote (or just configure a token with "
+                  f"--ocr-token / PADDLE_OCR_TOKEN / `editppt config "
+                  f"--paddle-ocr-token`).",
+                  file=sys.stderr)
+            return 1
+        counts = run_ocr_batch(ocr, pairs, args.min_conf)
+    print(f"  {backend} OCR done in {time.time() - t0:.1f}s "
           f"({sum(counts)} total detections)", flush=True)
 
     # ---- Stage 2: cross-verify + review-packet build ----
@@ -394,6 +547,16 @@ def main() -> int:
     total_tier = {"green": 0, "yellow": 0, "red": 0}
     total_rescue = {"attempted": 0, "upgraded": 0}
     review_entry_counts = []
+    # The 4th-engine rescue needs a recognizer: the warm local model from
+    # stage 1, or the cloud service when explicitly allowed (it costs one
+    # job per red entry).
+    use_rescue = not args.skip_cross_verify
+    rescuer = None
+    if use_rescue and backend == "remote" and args.remote_crop_rescue:
+        rescuer = make_remote_rescuer(args, token)
+    elif use_rescue and backend == "remote":
+        print("  note: 4th-engine crop rescue disabled on the remote "
+              "backend (pass --remote-crop-rescue to enable)", flush=True)
     for n in nums:
         ocr_path = ocr_dir / f"page_{n}.ocr.json"
         image_path = image_paths[n]
@@ -412,8 +575,10 @@ def main() -> int:
             moderate_conf=args.moderate_conf,
             do_cross_verify=not args.skip_cross_verify,
             # Reuse the warm Paddle model from stage 1 for the 4th-engine
-            # rescue pass on RED entries.
-            paddle_model=ocr if not args.skip_cross_verify else None,
+            # rescue pass on RED entries; the remote backend uses the
+            # cloud rescuer instead.
+            paddle_model=ocr if use_rescue else None,
+            remote_rescuer=rescuer,
         )
         tc = review.get("tier_counts", {})
         rs = review.get("rescue_stats", {})

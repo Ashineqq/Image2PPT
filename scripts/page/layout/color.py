@@ -46,8 +46,11 @@ def _classify_text_color(r: int, g: int, b: int, bg: np.ndarray) -> str:
         return "#D43E3E"
     # Canonical deck blue. Require a real blue-vs-gray separation; low
     # saturation grey-blue body text such as #7A8191 should remain grey
-    # instead of being snapped to the saturated title blue.
-    if b > r + 28 and b > g + 18 and b > 80:
+    # instead of being snapped to the saturated title blue. The floor is
+    # high enough to keep desaturated slate headings (#33475F, #5B7A8A)
+    # at their sampled colour while still snapping true deck blues
+    # (#09458E) — otherwise a 1:1 rebuild recolours those headings.
+    if b > r + 60 and b > g + 40 and b > 100:
         return "#054798"
     if r < 80 and g < 80 and b < 80:
         return "#222222"
