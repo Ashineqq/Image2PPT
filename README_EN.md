@@ -22,9 +22,9 @@ Nearly all text in the source image is restored as editable PPT text boxes, whil
 ## Highlights
 
 - Nearly all text and icons can still be edited, moved, or replaced in PowerPoint.
-- Very low token usage, and even zero token usage when used as a command-line tool: the main pipeline uses local OCR and image algorithms, so it does not repeatedly send whole slides to cloud multimodal models.
-- Fast generation: batch OCR reuses warm models, and the remaining page stages run automatically.
-- No extra cloud API required: OCR, image segmentation, PPTX generation, and preview checks all run locally.
+- Very low token usage, and even zero token usage when used as a command-line tool: the main pipeline uses OCR and image algorithms, so it does not repeatedly send whole slides to cloud multimodal models.
+- Fast generation: the whole batch goes to one cloud OCR job, and the remaining page stages run automatically.
+- Cloud OCR: recognition runs on Baidu AI Studio's PP-OCRv5, so no model weights are downloaded, no local CPU is spent, and there is no `paddleocr` / `torch` to install. See "OCR Backend" below.
 - Supports common bitmap inputs: PNG, JPG/JPEG, WebP, BMP, TIF/TIFF.
 - Supports PDF input: reads the PDF text layer directly, skips OCR, and reproduces text with 100% fidelity (see below).
 
@@ -82,9 +82,12 @@ This is suitable if you:
 git clone https://github.com/GuopengLin/Image2PPT.git
 cd Image2PPT
 bash scripts/bootstrap.sh
+
+# OCR runs in the cloud; an Access Token is required (the free quota is plenty)
+export PADDLE_OCR_TOKEN="<token>"
 ```
 
-`bootstrap.sh` installs Python dependencies, local OCR dependencies, LibreOffice/Poppler preview tools, and pre-downloads model caches. It works directly on macOS and common Linux distributions. On Windows or managed environments, you can install dependencies manually with `requirements.txt`.
+`bootstrap.sh` installs Python dependencies, LibreOffice/Poppler preview tools, and pre-downloads model caches. It works directly on macOS and common Linux distributions. On Windows or managed environments, you can install dependencies manually with `requirements.txt`.
 
 Then run the one-command pipeline:
 
@@ -140,13 +143,56 @@ python scripts/build_deck.py \
 
 If `build_deck.py` reports uncertain OCR entries, open `ocr/page_NN.ocr_review.annotated.png` to inspect the highlighted text, edit `corrected_text` in the corresponding `ocr_review.json`, then rerun the last two steps. By default, when `--skip-render` is not used, `build_deck.py` first renders text-only calibration previews to adjust font sizes, then runs multiple passes to adjust text box positions.
 
+## OCR Backend
+
+Text recognition (PP-OCRv5) runs on the Baidu AI Studio cloud service, so
+there are no local weights to download, no local CPU cost, and no
+`paddleocr` / `paddlepaddle` to install. The whole input goes up as ONE job
+(multi-page inputs are packed into a single PDF), so many pages cost far
+less than a per-page local loop would.
+
+Pages are uploaded to Baidu AI Studio — do not use this on confidential
+material.
+
+### Token setup (required)
+
+Apply for an Access Token at
+<https://aistudio.baidu.com/account/accessToken> (the free personal quota is
+more than enough). Then pick one of, highest priority first:
+
+```bash
+# 1. Pass it to the command
+python scripts/convert.py --source slides --ocr-token "<token>"
+
+# 2. Environment variable
+export PADDLE_OCR_TOKEN="<token>"
+
+# 3. Shared config file (also used by the image-to-editable-ppt skill)
+editppt config --paddle-ocr-token "<token>"    # writes ~/.editppt/config.yaml
+```
+
+Configure it once and it sticks. The OCR stage exits with an error when no
+token is configured.
+
+### Related options
+
+- `--ocr-token <token>`: cloud token; defaults to `$PADDLE_OCR_TOKEN`, then `~/.editppt/config.yaml`.
+- `--ocr-model PP-OCRv5`: cloud model name. Do **not** switch to a `PaddleOCR-VL-*` name: those answer with layout blocks (one box per paragraph, multi-line content joined without separators), while the layout stage needs one box per text line.
+- `--crop-rescue`: re-read red-tier entries from their isolated, upscaled crop (one extra job per red entry — slow). Off by default.
+
+`--detect-tables` uses the same token: candidate regions go to
+**PP-StructureV3**, which detects the table, returns its structure as HTML,
+and recognizes the cell text itself, so cells need no OCR-to-cell matching
+and merges come back as rowspan/colspan.
+
 ## GPU Acceleration (automatic)
 
-The hot loop is PaddleOCR (PP-OCRv5) plus the optional PaddleX table model
-and ONNX RMBG. `bootstrap.sh` auto-detects: if `nvidia-smi` is on PATH and
-reports a device, it installs the CUDA wheels (`paddlepaddle-gpu` +
-`onnxruntime-gpu`); otherwise it installs the CPU wheels. The runtime code
-also auto-detects, so you don't need any extra flag to actually use the GPU.
+The only local inference is the ONNX Runtime path (the font classifier and
+the optional RMBG model) — OCR itself runs in the cloud. `bootstrap.sh`
+auto-detects: if `nvidia-smi` is on PATH and reports a device, it installs
+the CUDA wheel (`onnxruntime-gpu`); otherwise the CPU wheel. The runtime
+code also auto-detects, so you don't need any extra flag to actually use
+the GPU.
 
 ```bash
 bash scripts/bootstrap.sh          # auto GPU or CPU
@@ -163,15 +209,15 @@ DECKWEAVER_DEVICE=auto python scripts/convert.py --source ...   # default
 ```
 
 Note: on macOS (including Apple Silicon) only the ONNX CoreML path is kept;
-PaddlePaddle has no upstream MPS backend, so requesting GPU there falls
-back to CPU. EasyOCR's MPS path stays off by default — it warns on every
-load and the speedup on tiny per-line crops is negligible.
+anything else falls back to CPU.
 
 ## Common Options
 
 ```bash
 python scripts/convert.py --source slides --pages 1,3,8
 python scripts/convert.py --source slides --skip-render
+python scripts/convert.py --source slides --ocr-token "<token>"
+python scripts/convert.py --source slides --crop-rescue
 python scripts/convert.py --source slides --detect-tables
 python scripts/convert.py --source slides --icon-review
 python scripts/ocr/prepare_ocr.py --pages 1,3,8 ...
@@ -181,6 +227,8 @@ python scripts/build_deck.py --icon-review ...
 ```
 
 - `--pages`: process only selected pages.
+- `--ocr-token` / `--ocr-model` / `--crop-rescue`: cloud OCR token and red-tier re-read, see "OCR Backend".
+- `--detect-tables` / `--table-score-threshold`: table recognition, see "OCR Backend".
 - `--skip-render`: skip LibreOffice preview rendering and the default text calibration.
 - `--skip-calibration`: skip preview-based text size and position calibration only.
 - `--font-calibration-iterations 1`: set font-size calibration passes.
@@ -196,11 +244,11 @@ python scripts/build_deck.py --icon-review ...
 ├── assets/            # logo and project assets
 ├── scripts/
 │   ├── convert.py    # one-command conversion entry point
-│   ├── ocr/          # OCR, cross-verification, review application, native PDF text ingest
+│   ├── ocr/          # cloud OCR (ocr_remote.py), confidence tiering (ocr_tier.py), review application, native PDF text ingest
 │   ├── page/         # per-page text erasing, element detection, layout generation
 │   ├── deck/         # layout merging and PPTX generation
 │   ├── verify/       # PPTX inspection and preview rendering
-│   ├── tables/       # optional table recognition
+│   ├── tables/       # table recognition (detect_tables.py candidates, table_remote.py cloud structure)
 │   └── optional/     # optional post-processing tools
 ├── references/       # layout format and workflow documentation
 ├── SKILL.md          # skill workflow instructions
@@ -210,6 +258,8 @@ python scripts/build_deck.py --icon-review ...
 ## Notes
 
 - The one-command entry accepts a single image, an image folder, or a PDF file. Image inputs not named `page_NN.<ext>` are copied into the run directory and numbered automatically; PDF inputs are rasterised and text-extracted by `scripts/ocr/pdf_ingest.py`.
+- OCR uploads the page images to Baidu AI Studio, so do not use it on confidential material; table recognition is the same.
+- Dependencies are light: no `paddleocr` / `paddlepaddle` / `easyocr` / `torch` — `requirements.txt` is all you need, and the OCR weights live in the cloud.
 - Multi-page decks work best when all source images share the same aspect ratio. PowerPoint only supports one slide size per file.
 - Complex charts are currently preserved as movable picture objects first, instead of being rebuilt as editable data charts.
 - Generated files are written to `output/` by default, and this directory is not committed to Git.

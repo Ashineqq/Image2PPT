@@ -14,7 +14,7 @@ Defense in depth, three layers — applied to every `convert.py` spawn:
 
 3. **Filesystem sandbox.** Wraps the command line so the child can
    *write* only inside its own job directories plus a small allowlist
-   of cache dirs (PaddleOCR / EasyOCR / Hugging Face model caches).
+   of cache dirs (Hugging Face model caches).
    Reads are still wide open so the Python interpreter and ML libs
    keep working. Backend selected automatically:
 
@@ -150,15 +150,11 @@ def _macos_profile(upload_dir: Path, output_dir: Path, allow_network: bool) -> s
         # underlying device permissions still apply.
         "/dev",
         "/private/dev",
-        # ML / OCR caches + tool config dirs.
+        # ML caches + tool config dirs.
         str(home / ".cache"),
         str(home / ".config"),                       # LibreOffice user profile lives here
         str(home / "Library" / "Caches"),
         str(home / "Library" / "Application Support"),  # macOS LibreOffice
-        str(home / ".paddleocr"),
-        str(home / ".paddlex"),
-        str(home / ".paddle"),
-        str(home / ".EasyOCR"),
         str(home / ".huggingface"),
         str(home / ".u2net"),  # rembg sometimes uses this
     ]
@@ -218,8 +214,7 @@ def wrap_command(
             # caches still work (CLI was designed assuming write access).
             "--bind", str(REPO_ROOT), str(REPO_ROOT),
         ]
-        for sub in (".cache", ".config", ".paddleocr", ".paddlex", ".paddle",
-                    ".EasyOCR", ".huggingface", ".u2net"):
+        for sub in (".cache", ".config", ".huggingface", ".u2net"):
             p = home / sub
             p.mkdir(parents=True, exist_ok=True)
             args += ["--bind", str(p), str(p)]
@@ -237,8 +232,7 @@ def wrap_command(
             f"--read-write={output_dir}",
             f"--read-write={REPO_ROOT}",
         ]
-        for sub in (".cache", ".config", ".paddleocr", ".paddlex", ".paddle",
-                    ".EasyOCR", ".huggingface", ".u2net"):
+        for sub in (".cache", ".config", ".huggingface", ".u2net"):
             p = home / sub
             p.mkdir(parents=True, exist_ok=True)
             args.append(f"--read-write={p}")

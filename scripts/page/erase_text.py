@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Erase text regions from a slide image, preserving icons/logos.
 
-Reads OCR JSON (from ocr_paddle.py) and writes a "cleaned" image where
-ordinary text regions are replaced with their local background color
-via solid fill (not blur).
+Reads the OCR JSON written by the OCR stage and writes a "cleaned" image
+where ordinary text regions are replaced with their local background
+color via solid fill (not blur).
 
 Three OCR results are PRESERVED (not erased) — they're likely part of
 icons/logos:

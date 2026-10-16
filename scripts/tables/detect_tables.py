@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """Heuristic table-region detector driven by OCR layout.
 
-`table_recognize.py` is structure-only — it ASSUMES its input is a table.
-Asking the agent to identify tables visually works but doesn't scale, and
-the auto-extract pipeline currently has no automatic entry point into the
-table flow. This script bridges that gap: it scans the OCR JSON for a
-rectangular grid of texts (≥`min_rows` × ≥`min_cols`, mutually aligned
-on both axes) and emits candidate bboxes that `table_recognize.py` can
-then verify with SLANet_plus.
+Table structure recognition only verifies a region it is handed — it
+ASSUMES its input is a table. Asking the agent to identify tables
+visually works but doesn't scale, and the auto-extract pipeline has no
+other automatic entry point into the table flow. This script bridges that
+gap: it scans the OCR JSON for a rectangular grid of texts (≥`min_rows` ×
+≥`min_cols`, mutually aligned on both axes) and emits candidate bboxes
+that the recognizer can then verify.
 
 Approach (no model — pure layout heuristic):
 
@@ -27,9 +27,9 @@ or icon labels into a fake table render. Real tables on a slide are
 usually clean, well-aligned and have ≥3 rows and ≥2 columns — exactly
 the regime the heuristic targets.
 
-The bbox emitted padds the tight cell-union by 6 px so SLANet_plus has
-a small margin around the cells (its model was trained on tables with
-some surrounding whitespace).
+The bbox emitted padds the tight cell-union by 6 px so the recognizer
+has a small margin around the cells (the model was trained on tables
+with some surrounding whitespace).
 
 Usage:
 
@@ -72,8 +72,8 @@ def parse_args() -> argparse.Namespace:
                    help="Two row entries are in the SAME column when their "
                         "x-lefts differ by ≤ this many pixels.")
     p.add_argument("--padding-px", type=int, default=6,
-                   help="Padding around the bbox to give SLANet a small "
-                        "margin around the cells.")
+                   help="Padding around the bbox to give the recognizer "
+                        "a small margin around the cells.")
     return p.parse_args()
 
 

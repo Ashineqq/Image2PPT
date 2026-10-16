@@ -446,7 +446,7 @@ class Builder:
         Cell entries are sparse — any (row, col) not listed renders as an
         empty cell with default style. Merged cells (rowspan/colspan>1)
         use python-pptx's `merge` API and stash the text on the top-left
-        cell, mirroring SLANet's structure output.
+        cell, mirroring the recognizer's structure output.
         """
         left, top, width, height = el["box"]
         rows = int(el.get("rows", 0))

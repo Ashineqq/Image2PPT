@@ -1,12 +1,11 @@
 #!/usr/bin/env python
-"""Remote table structure recognition (PaddleOCR PP-StructureV3).
+"""Table structure recognition (PaddleOCR PP-StructureV3, Baidu AI Studio).
 
-The cloud twin of `table_recognize.py`: the slide is sent to the Baidu AI
-Studio PaddleOCR service, which detects the table itself, returns its
-structure as HTML, and — unlike the local SLANet_plus model — also
-recognizes the cell text, so no OCR-to-cell matching is needed to fill
-the grid. Output is byte-compatible with the local script, so
-`run_pipeline.py` can call either.
+The slide is sent to the Baidu AI Studio PaddleOCR service, which detects
+the table itself, returns its structure as HTML, and also recognizes the
+cell text, so no OCR-to-cell matching is needed to fill the grid.
+`run_pipeline.py` shells out to this script for every accepted candidate
+region.
 
 Why the whole slide and not the crop: PP-StructureV3 runs layout
 detection first, so it does better on a page in context than on a
@@ -25,8 +24,7 @@ Pipeline:
                             ▼
                        tables.json
 
-Output schema — identical to `table_recognize.py`, one table per
-invocation:
+Output schema — one table per invocation:
     {
       "bbox": [x1, y1, x2, y2],         // table region in SOURCE-image coords
       "rows": 4, "cols": 5,
@@ -41,13 +39,10 @@ invocation:
       ]
     }
 
-Note on `score`: the local backend reports SLANet's structure confidence,
-which the caller gates at `--table-score-threshold` (default 0.85). The
-cloud service does not return a comparable structure score, so this
-backend reports the layout detector's confidence for the table block.
-That gate stays useful (it is what rejects decorative banners), but its
-number is no longer measured the same way, so the threshold is not
-directly transferable between the two backends.
+Note on `score`: this is the layout detector's confidence for the table
+block, which the caller gates at `--table-score-threshold` (default 0.85).
+Clean tables measure 0.97-0.99, so the gate rejects decorative banners
+without touching real tables.
 
 Usage:
     python scripts/tables/table_remote.py slide.png \
@@ -393,9 +388,8 @@ def main() -> int:
     except ocr_remote.RemoteOCRError as exc:
         sys.stderr.write(
             f"ERROR: {exc}\n"
-            "  The remote table backend needs the same PaddleOCR token as "
-            "the OCR stage.\n"
-            "  Pass --table-backend local to use SLANet_plus instead.\n"
+            "  Table detection needs the same PaddleOCR token as the OCR "
+            "stage.\n"
         )
         return 1
 

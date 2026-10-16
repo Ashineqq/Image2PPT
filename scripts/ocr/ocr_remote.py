@@ -1,16 +1,16 @@
 #!/usr/bin/env python
-"""PaddleOCR over the Baidu AI Studio cloud API — remote twin of `ocr_paddle.py`.
+"""PaddleOCR (PP-OCRv5) over the Baidu AI Studio cloud API.
 
-Same output contract as the local backend: a JSON list of
+Output contract: a JSON list of
 `{text, x1, y1, x2, y2, confidence}` objects in SOURCE-IMAGE pixel
 coordinates (plus `words`/`word_boxes`, and `chars`/`char_boxes` for
 pure-CJK lines, when the service returns per-word boxes). Downstream
-`erase_text.py`, `build_inventory.py` and `inventory_to_layout.py` cannot
-tell which backend produced a file.
+`erase_text.py`, `build_inventory.py` and `inventory_to_layout.py` only
+see that shape.
 
-The cloud service runs the same PP-OCRv5 models the local install uses,
-so no accuracy is traded away — only the ~85 MB of PaddleX weights and
-the PaddlePaddle runtime (and its per-page CPU cost) stop being local.
+The service runs PP-OCRv5 itself, so no model weights are downloaded and
+no PaddlePaddle runtime is needed — no ~85 MB of PaddleX weights, no
+per-page CPU cost.
 `--model PaddleOCR-VL-1.6` is also accepted, but that model answers with
 LAYOUT BLOCKS (one box per paragraph, multi-line content joined without
 separators), not per-line records, and downstream layout depends on one
@@ -208,7 +208,7 @@ def _page_dims(data_info: dict, index: int) -> tuple[float, float]:
 def extract_items(pruned: dict, min_conf: float,
                   scale_x: float = 1.0, scale_y: float = 1.0,
                   bounds: tuple[int, int] | None = None) -> list[dict]:
-    """Build the same item shape `ocr_paddle.extract_items()` produces.
+    """Build the OCR item shape the rest of the pipeline consumes.
 
     `scale_x`/`scale_y` map OCR-space coordinates onto source pixels;
     `bounds` clips the result to the source image size (the service may
@@ -400,8 +400,8 @@ def run_crop(image, *, token: str, model: str = DEFAULT_MODEL,
              min_conf: float = 0.0, timeout: float = DEFAULT_TIMEOUT) -> tuple[str, float]:
     """OCR a single in-memory crop (PIL image) → (text, confidence).
 
-    Remote twin of `ocr_cross_verify.run_paddle_crop`. One job per crop,
-    so callers should keep this to a small number of regions.
+    One job per crop, so callers should keep this to a small number of
+    regions.
     """
     fd, name = tempfile.mkstemp(prefix="deckweaver_crop_", suffix=".png")
     os.close(fd)
@@ -419,7 +419,7 @@ def run_crop(image, *, token: str, model: str = DEFAULT_MODEL,
 
 
 # --------------------------------------------------------------------------
-# CLI (mirrors ocr_paddle.py)
+# CLI
 # --------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:

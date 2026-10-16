@@ -12,7 +12,7 @@ cd "$REPO"
 # Backend deps are kept separate from the main project requirements —
 # users who only use the CLI never need fastapi/sqlalchemy/etc. We
 # install into the same Python that runs scripts/convert.py (so the
-# subprocess pipeline keeps finding paddleocr et al.), but as a
+# subprocess pipeline keeps finding its imports), but as a
 # separate, opt-in step. Homebrew / Debian Python is externally
 # managed (PEP 668); fall back to --break-system-packages there.
 if ! python3 -c "import fastapi" 2>/dev/null; then

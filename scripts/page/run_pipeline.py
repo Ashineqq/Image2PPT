@@ -13,7 +13,7 @@ per-page Python startup. Each script also exposes a CLI for hand-runs:
     inventory_to_layout cv2-cropped asset PNGs + editable layout JSON
 
 Optional pre-pass: `--detect-tables` runs the OCR-grid table detector
-and verifies candidates with SLANet_plus. Accepted regions become
+and verifies candidates with the cloud table service. Accepted regions become
 native PPT table elements; their cells are dropped from the editable
 text stream so they don't double-render.
 
@@ -95,7 +95,7 @@ def parse_args() -> argparse.Namespace:
                    action="store_true",
                    help="Run the heuristic OCR-grid table detector "
                         "(detect_tables.py). When a candidate region "
-                        "passes SLANet_plus structure verification "
+                        "passes table structure verification "
                         "(score >= 0.85) it's emitted as a native PPT "
                         "table element and its cells are removed from "
                         "the editable-text stream so they don't render "
@@ -104,24 +104,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-detect-tables", dest="detect_tables",
                    action="store_false",
                    help="Disable automatic table detection.")
-    # Default OFF: SLANet hits high structure scores on styled banner
-    # regions (dark card + decorative columns) and consumes their OCR
+    # Default OFF: the structure model scores styled banner regions
+    # (dark card + decorative columns) highly and consumes their OCR
     # text into a fake 2xN grid that renders mostly empty. Pass
     # `--detect-tables` only when the deck has literal grid tables.
     p.set_defaults(detect_tables=False)
     p.add_argument("--table-score-threshold", type=float, default=0.85,
-                   help="Minimum structure confidence to accept a detected "
-                        "region as a table. Note that the two backends "
-                        "measure this differently: local SLANet_plus "
-                        "reports a structure score, while the cloud "
-                        "backend reports the table block's layout "
-                        "confidence, so the default is not directly "
-                        "transferable between them.")
-    p.add_argument("--table-backend", choices=["auto", "remote", "local"],
-                   default="auto",
-                   help="Table recognizer. auto (default) uses the cloud "
-                        "PP-StructureV3 when a PaddleOCR token is "
-                        "configured, else local SLANet_plus.")
+                   help="Minimum confidence to accept a detected region as "
+                        "a table. The cloud backend reports the table "
+                        "block's layout confidence.")
     p.add_argument("--icon-review", action="store_true",
                    help="Emit an LLM icon-review packet per page: "
                         "<work>/ocr/icon_review/page_NN/"
@@ -270,7 +261,7 @@ def _ruled_lines(img: np.ndarray) -> tuple[list[tuple[int, int, int, int]],
 
 
 # =============================================================================
-# Table detection (OCR-grid + image-line candidates, SLANet verification)
+# Table detection (OCR-grid + image-line candidates, structure verification)
 # =============================================================================
 
 
@@ -298,7 +289,7 @@ def _table_grid_metrics(raw_cells: list[dict],
                         bbox: tuple[int, int, int, int],
                         rows: int,
                         cols: int) -> tuple[list[int], list[int]]:
-    """Estimate native-table column widths/row heights from SLANet cells."""
+    """Estimate native-table column widths/row heights from the recognized cells."""
     bx1, by1, bx2, by2 = bbox
     xs: list[list[int]] = [[] for _ in range(cols + 1)]
     ys: list[list[int]] = [[] for _ in range(rows + 1)]
@@ -462,7 +453,7 @@ def _looks_like_ruled_table(src_path: Path,
     """Conservative image prefilter for table candidates.
 
     OCR alignment alone misreads stat cards and comparison callouts as
-    tables. Before invoking SLANet, require visible ruling lines that span
+    tables. Before invoking the recognizer, require visible ruling lines that span
     most of the candidate region. This keeps wired tables while rejecting
     slide layouts that are merely grid-like.
     """
@@ -484,40 +475,18 @@ def _looks_like_ruled_table(src_path: Path,
         v_count >= min(2, max(1, cols - 1))
 
 
-def _table_recognizer(table_backend: str) -> tuple[Path, str, float]:
-    """Which recognizer script to shell out to, its label, and its timeout.
-
-    `auto` prefers the cloud: PP-StructureV3 both structures the table and
-    recognizes its cell text, so cells need no OCR-to-cell matching, and
-    the service reports merges the local SLANet path expresses less
-    reliably.
-    """
-    has_token = False
-    try:
-        sys.path.insert(0, str(SCRIPTS_ROOT / "ocr"))
-        import ocr_remote
-        has_token = bool(os.environ.get("PADDLE_OCR_TOKEN", "").strip()
-                         or ocr_remote.read_config_token())
-    except ImportError:
-        has_token = False
-    if table_backend == "local":
-        use_remote = False
-    elif table_backend == "remote":
-        use_remote = True
-    else:
-        use_remote = has_token
-    if use_remote:
-        # One cloud job per candidate region, plus queue time: the local
-        # SLANet call is ~0.1s, this is tens of seconds.
-        return SCRIPTS_ROOT / "tables" / "table_remote.py", "remote", 300.0
-    return SCRIPTS_ROOT / "tables" / "table_recognize.py", "local", 60.0
+# Table recognition runs on the cloud PP-StructureV3 service: it both
+# structures the table and recognizes its cell text, so cells need no
+# OCR-to-cell matching and merges come back as rowspan/colspan. One job
+# per candidate region, plus queue time.
+TABLE_RECOGNIZER = SCRIPTS_ROOT / "tables" / "table_remote.py"
+TABLE_RECOGNIZER_TIMEOUT = 300.0
 
 
 def _detect_tables_for_page(num: str, src_path: Path, ocr: list[dict],
                             ocr_path: Path, work: Path,
-                            score_threshold: float,
-                            table_backend: str = "auto") -> tuple[list[dict],
-                                                                 set[int]]:
+                            score_threshold: float) -> tuple[list[dict],
+                                                             set[int]]:
     """Run the OCR grid detector + structure verification for this page.
 
     Returns (table_elements, consumed_ocr_indices) where:
@@ -549,7 +518,8 @@ def _detect_tables_for_page(num: str, src_path: Path, ocr: list[dict],
     accepted_cell_bboxes: list[tuple[int, int, int, int]] = []
     table_elements: list[dict] = []
     tables_path = work / "ocr" / f"page_{num}.table.json"
-    recognizer, backend_label, timeout = _table_recognizer(table_backend)
+    recognizer = TABLE_RECOGNIZER
+    timeout = TABLE_RECOGNIZER_TIMEOUT
     for idx, cand in enumerate(candidates):
         x1, y1, x2, y2 = cand["bbox"]
         if not _looks_like_ruled_table(
@@ -569,8 +539,8 @@ def _detect_tables_for_page(num: str, src_path: Path, ocr: list[dict],
                 "--out", str(out_path),
             ], capture_output=True, timeout=timeout)
         except (subprocess.SubprocessError, OSError) as exc:
-            print(f"page {num}: {recognizer.name} ({backend_label}) "
-                  f"failed ({exc})", file=sys.stderr)
+            print(f"page {num}: {recognizer.name} failed ({exc})",
+                  file=sys.stderr)
             continue
         if r.returncode != 0 or not out_path.exists():
             continue
@@ -604,7 +574,7 @@ def _detect_tables_for_page(num: str, src_path: Path, ocr: list[dict],
             continue
         if rows < 2 or cols < 2:
             continue
-        # Cell-fill sanity check. SLANet can land a high structure score on
+        # Cell-fill sanity check. The recognizer can land a high score on
         # a styled decorative banner (white-on-blue text inside a wide card
         # with subtle column gutters), then return only 3-4 cells with
         # text in a declared rows*cols grid — most of the grid is empty
@@ -720,7 +690,7 @@ def _detect_tables_for_page(num: str, src_path: Path, ocr: list[dict],
     # already represented as table-cell text; drop them from the editable
     # stream to avoid the duplicate-render artefact. Items inside the
     # outer table bbox but in a row-gap / cell-less region are KEPT —
-    # otherwise SLANet's slightly-loose table outline silently eats
+    # otherwise the recognizer's slightly-loose table outline silently eats
     # decorative captions that live just below the last row.
     consumed: set[int] = set()
     for i, it in enumerate(ocr):
@@ -788,7 +758,6 @@ def _erase_table_regions(clean_path: Path,
 def process_page(num: str, src_dir: Path, work: Path,
                  *, detect_tables_flag: bool = False,
                  table_score_threshold: float = 0.85,
-                 table_backend: str = "auto",
                  icon_review_dump: bool = False,
                  icon_decisions: bool = False) -> dict:
     """Erase → inventory → layout for one page.
@@ -829,7 +798,6 @@ def process_page(num: str, src_dir: Path, work: Path,
     if detect_tables_flag:
         table_layout_elements, table_consumed = _detect_tables_for_page(
             num, src_path, ocr, ocr_path, work, table_score_threshold,
-            table_backend,
         )
 
     # ---- optional: icon-review overrides ----
@@ -992,7 +960,6 @@ def main() -> None:
                 n, src_dir, work,
                 detect_tables_flag=args.detect_tables,
                 table_score_threshold=args.table_score_threshold,
-                table_backend=args.table_backend,
                 icon_review_dump=args.icon_review,
                 icon_decisions=args.icon_decisions,
             )

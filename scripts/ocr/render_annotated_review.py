@@ -8,8 +8,8 @@ which contains:
   - the original slide on the left, with every review entry drawn as a
     colored bounding box: GREEN (high-consensus), YELLOW (weak/single-
     engine consensus), RED (no consensus)
-  - a side legend listing each entry's idx, tier, all 3 engine
-    candidates, and the pre-filled `suggested_text`
+  - a side legend listing each entry's idx, tier, the recognizer's
+    reading, and the pre-filled `suggested_text`
 
 The agent reads the image, then either:
   - accepts the suggested texts (no edits needed — deck rebuilds with
@@ -68,9 +68,8 @@ def render_annotated_page(image_path: Path, entries: list[dict],
           "tier": "green" | "yellow" | "red",
           "reason": str,            # e.g. "A_strict_consensus"
           "candidates": {
-            "paddle":    {"text": "...", "conf": 0.91},
-            "easyocr":   {"text": "...", "conf": 0.30},
-            "tesseract": {"text": "...", "conf": 0.10},
+            "primary": {"text": "...", "conf": 0.91},
+            "crop":    {"text": "...", "conf": 0.30},  # only after a rescue
           },
           "suggested_text": "...",
           "corrected_text": "...",   # usually = suggested_text on first render
@@ -119,34 +118,28 @@ def render_annotated_page(image_path: Path, entries: list[dict],
     rows = []
     for display_pos, e in enumerate(entries, 1):
         cand = e.get("candidates", {})
-        pp = cand.get("paddle",      {"text": "", "conf": 0.0})
-        ez = cand.get("easyocr",     {"text": "", "conf": 0.0})
-        ts = cand.get("tesseract",   {"text": "", "conf": 0.0})
-        pc = cand.get("paddle_crop", None)  # may be absent
+        pr = cand.get("primary", {"text": "", "conf": 0.0})
+        cr = cand.get("crop", None)  # may be absent
         rows.append({
             "n": display_pos,
             "idx": e["idx"],
             "tier": e["tier"],
             "reason": e.get("reason", ""),
             "suggested": e.get("suggested_text", ""),
-            "pp_text": pp.get("text", ""),
-            "pp_conf": pp.get("conf", 0.0),
-            "ez_text": ez.get("text", ""),
-            "ez_conf": ez.get("conf", 0.0),
-            "ts_text": ts.get("text", ""),
-            "ts_conf": ts.get("conf", 0.0),
-            "pc_text": (pc or {}).get("text", "") if pc is not None else None,
-            "pc_conf": (pc or {}).get("conf", 0.0) if pc is not None else None,
+            "pr_text": pr.get("text", ""),
+            "pr_conf": pr.get("conf", 0.0),
+            "cr_text": (cr or {}).get("text", "") if cr is not None else None,
+            "cr_conf": (cr or {}).get("conf", 0.0) if cr is not None else None,
         })
 
     # Calculate legend height: header row + per-entry block.
-    # Per-entry block contains: header line + up to 4 candidate lines
-    # (paddle / easyocr / tesseract / optional paddle_crop) + suggested.
-    has_paddle_crop = any(
-        "paddle_crop" in (e.get("candidates") or {}) for e in entries
+    # Per-entry block contains: header line + the reading line + an
+    # optional crop-rescue line + suggested.
+    has_crop = any(
+        "crop" in (e.get("candidates") or {}) for e in entries
     )
     title_h = 36
-    cand_lines = 4 if has_paddle_crop else 3
+    cand_lines = 2 if has_crop else 1
     block_h = (1 + cand_lines + 1) * line_h + row_pad_y * 2
     legend_h = title_h + len(rows) * block_h
     canvas_h = max(page_h, legend_h)
@@ -188,17 +181,12 @@ def render_annotated_page(image_path: Path, entries: list[dict],
                    fill=(60, 60, 60), font=body_font)
         ly += line_h + 2
 
-        # Candidate lines (truncate texts to fit the column width).
-        # PP = full-page Paddle, PC = paddle-on-crop (4th engine, only
-        # present when the entry was originally RED and rescue ran),
-        # EZ = EasyOCR, TS = Tesseract.
-        cand_lines = [
-            ("PP", r["pp_text"], r["pp_conf"]),
-            ("EZ", r["ez_text"], r["ez_conf"]),
-            ("TS", r["ts_text"], r["ts_conf"]),
-        ]
-        if r["pc_text"] is not None:
-            cand_lines.insert(1, ("PC", r["pc_text"], r["pc_conf"]))
+        # Reading lines (truncate texts to fit the column width).
+        # OCR = the full-page pass, CROP = the isolated-crop re-read (only
+        # present when the entry was RED and the crop rescue ran).
+        cand_lines = [("OCR", r["pr_text"], r["pr_conf"])]
+        if r["cr_text"] is not None:
+            cand_lines.append(("CROP", r["cr_text"], r["cr_conf"]))
         for label, txt, conf in cand_lines:
             shown = _shorten(txt, 60)
             ldraw.text((lx + 8, ly),

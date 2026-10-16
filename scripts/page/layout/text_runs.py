@@ -35,7 +35,7 @@ def _per_char_runs(bbox: list[int], text: str, orig_img: np.ndarray,
 
       A) Real per-CHAR bboxes (`char_boxes`). Used for pure-CJK lines
          where PaddleOCR returns one box per glyph. char_boxes are
-         only attached by ocr_paddle when each word is a single char
+         only attached by the recognizer when each word is a single char
          (i.e. no digit clusters), so this branch handles long CJK
          sentences with embedded colour emphasis.
 

@@ -74,9 +74,9 @@ def _emit_text_element_record(
         (int(x1), int(y1), int(x2), int(y2)),
         source,
     )
-    # PaddleOCR per-char bboxes when present. ocr_paddle attaches these
-    # only when len(chars) == len(text); re-verify against the current
-    # text (OCR-review may have corrected it).
+    # PaddleOCR per-char bboxes when present. The recognizer attaches
+    # these only when len(chars) == len(text); re-verify against the
+    # current text (OCR-review may have corrected it).
     raw_text = el["text"]
     safe_text = ppt_safe_text(raw_text)
     cb = el.get("char_boxes")

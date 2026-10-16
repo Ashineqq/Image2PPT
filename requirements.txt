@@ -2,17 +2,7 @@ python-pptx
 pillow
 numpy
 opencv-python
-easyocr
-pytesseract
 onnxruntime
 huggingface_hub
 pymupdf
 requests
-
-# Local OCR backend only. The pipeline runs PP-OCRv5 either in-process
-# (scripts/ocr/ocr_paddle.py) or on the Baidu AI Studio cloud service
-# (scripts/ocr/ocr_remote.py). Neither line below is needed for the cloud
-# backend, which is what `--ocr-backend auto` picks as soon as a PaddleOCR
-# token is configured.
-paddleocr>=3
-paddlex[ocr]

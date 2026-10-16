@@ -1,35 +1,26 @@
 #!/usr/bin/env python
-"""Single-command OCR preparation with 3-engine cross-verification.
+"""Single-command OCR preparation with confidence tiering.
 
-Runs PP-OCRv5 over every supported `page_NN.*` image in --source-dir.
-The recognizer is either the Baidu AI Studio cloud service (`--ocr-backend
-remote`, no local Paddle install, all pages in one job) or the local
-paddleocr package (`--ocr-backend local`); both emit the same JSON shape,
-so nothing downstream changes. `auto` (the default) picks remote whenever
-a PaddleOCR token is available. For
-each page:
+Runs PP-OCRv5 over every supported `page_NN.*` image in --source-dir,
+always through the Baidu AI Studio cloud service (one job for the whole
+batch). For each page:
 
   1. Runs PP-OCRv5 to get baseline text + bbox + confidence
   2. Builds a review packet for entries with conf < --threshold (default 0.95)
-  3. For each review entry, runs EasyOCR + Tesseract 5 on the cropped
-     region and assigns a 3-engine consensus tier (the optional 4th-engine
-     Paddle crop rescue needs a local model, or --remote-crop-rescue to
-     spend one cloud job per red entry):
-       🟢 green  — strong (3/3 or 2/3 agree)
-       🟡 yellow — weak  (small edit-distance differences, OR one
-                          engine confidence ≥ 0.95, OR strongest
-                          engine conf ≥ 0.85 with disagreement)
-       🔴 red    — no consensus, no even-moderately-confident engine
-     suggested_text is the script-aware best guess. corrected_text is
-     pre-filled with suggested_text so the deck builds without agent
-     input.
+  3. Tiers each review entry by the recognizer's own confidence:
+       🟡 yellow — conf ≥ --moderate-conf (default 0.85), very likely right
+       🔴 red    — below that; the only tier the crop rescue can help,
+                   and the one worth reading carefully
+     `--crop-rescue` lets the red entries spend one extra cloud job each
+     re-reading the isolated, upscaled crop, which promotes those the crop
+     pass reads confidently. suggested_text is pre-filled so the deck
+     builds without agent input.
   4. Applies the 6 conservative autoclear heuristics (zero-FP) — these
      override corrected_text to "" for obvious logo/decorative misreads.
   5. Renders ONE annotated PNG per page showing:
        - the source image with every review entry's bbox outlined in
          its tier color and labeled with #N
-       - a side legend listing each entry's 3 engine candidates and
-         the suggested text
+       - a side legend listing each entry's reading and the suggested text
 
 Outputs:
 
@@ -42,10 +33,10 @@ Outputs:
                                                   written when entries
                                                   exist)
 
-The agent step is OPTIONAL now: after build_deck.py produces a first-
-draft PPTX, the user is asked whether to do a manual review of the
-annotated pages. If they say no, the deck ships as-is using consensus
-picks. If yes, the agent overrides specific entries by editing
+The agent step is OPTIONAL: after build_deck.py produces a first-draft
+PPTX, the user is asked whether to do a manual review of the annotated
+pages. If they say no, the deck ships as-is using the pre-filled
+suggestions. If yes, the agent overrides specific entries by editing
 corrected_text in the review JSONs, then build_deck.py reruns.
 
 Usage:
@@ -55,26 +46,21 @@ Usage:
 
 Optional flags:
     --pages 1,4,8         only process specified page numbers
-    --ocr-backend auto    auto | remote (AI Studio cloud) | local (paddleocr)
     --ocr-token TOKEN     cloud token; defaults to $PADDLE_OCR_TOKEN then
                           ~/.editppt/config.yaml
     --ocr-model PP-OCRv5  cloud model name
     --threshold 0.95      PP-OCRv5 conf threshold for queueing review
     --max-entries 50      cap on review entries per page
     --image-size WxH      slide size used by autoclear (default 1280x720)
-    --high-conf 0.95      single-engine threshold for D' rule
-    --moderate-conf 0.85  single-engine threshold for G fallback rule
-    --skip-cross-verify   skip 3-engine pass (review tier always "red")
+    --moderate-conf 0.85  confidence at or above which an entry is yellow
+    --crop-rescue         let the crop re-read run on red entries (one
+                          cloud job per red entry)
     --skip-autoclear      skip the autoclear pass
-    --remote-crop-rescue  allow the 4th-engine crop rescue to spend one
-                          cloud job per red entry (remote backend only)
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -89,36 +75,32 @@ from image_sources import (  # noqa: E402
     discover_page_numbers, find_page_image, supported_image_formats,
 )
 import ocr_remote  # noqa: E402
-from ocr_paddle import extract_items, quiet_paddle  # noqa: E402
 from ocr_review_autoclear import match_rule, parse_size  # noqa: E402
-from ocr_cross_verify import (  # noqa: E402
-    EnginePred, cross_verify, paddle_crop_rescue,
-    run_easyocr, run_paddle_crop, run_tesseract,
-)
+from ocr_tier import Prediction, classify, crop_rescue  # noqa: E402
 from render_annotated_review import render_annotated_page  # noqa: E402
-from shared.gpu import paddle_device  # noqa: E402
 
 
-# Crop-rescue upscaling rule, kept in step with
-# `ocr_cross_verify.run_paddle_crop`'s defaults.
-REMOTE_RESCUE_UPSCALE_WIDTH = 200
-REMOTE_RESCUE_UPSCALE_FACTOR = 3
+# Crop-rescue upscaling rule: long lines get more pixels per character,
+# short ones are left alone because LANCZOS on a few glyphs only adds
+# edge artifacts.
+CROP_RESCUE_UPSCALE_WIDTH = 200
+CROP_RESCUE_UPSCALE_FACTOR = 3
 
 REVIEW_INSTRUCTIONS = (
-    "Each entry's `corrected_text` has been pre-filled with the 3-engine "
-    "consensus suggestion. Open the matching "
+    "Each entry's `corrected_text` has been pre-filled with the "
+    "recognizer's reading. Open the matching "
     "`inventory/page_NN.ocr_review.annotated.png` to see every entry "
-    "highlighted on the source slide (color: 🟢 green = strong consensus, "
-    "🟡 yellow = weak consensus, 🔴 red = no consensus). For each entry "
-    "you disagree with, edit `corrected_text` here. Leave it as-is to "
-    "accept the suggestion. Set `corrected_text` to \"\" if the detection "
-    "is not real editable text (icon glyph, decorative mark)."
+    "highlighted on the source slide (color: 🟡 yellow = confident, "
+    "🔴 red = low confidence, read it carefully). For each entry you "
+    "disagree with, edit `corrected_text` here. Leave it as-is to accept "
+    "the suggestion. Set `corrected_text` to \"\" if the detection is not "
+    "real editable text (icon glyph, decorative mark)."
 )
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Batch OCR + 3-engine cross-verify + autoclear + "
+        description="Batch OCR + confidence tiering + autoclear + "
                     "annotated review images in one process."
     )
     p.add_argument("--source-dir", required=True,
@@ -130,13 +112,6 @@ def parse_args() -> argparse.Namespace:
                    help="Comma-separated page numbers (e.g. 1,4,8). "
                         "Default: every supported page_* image in "
                         "--source-dir.")
-    p.add_argument("--lang", default="ch", help="PaddleOCR lang (default ch).")
-    p.add_argument("--ocr-backend", choices=["auto", "remote", "local"],
-                   default="auto",
-                   help="Recognizer to use. auto (default) = the AI Studio "
-                        "cloud service when a token is available, else the "
-                        "local paddleocr package. remote = cloud only; "
-                        "local = paddleocr only.")
     p.add_argument("--ocr-token", default=None,
                    help="PaddleOCR cloud token; defaults to "
                         "$PADDLE_OCR_TOKEN, then ~/.editppt/config.yaml.")
@@ -145,33 +120,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ocr-timeout", type=float,
                    default=ocr_remote.DEFAULT_TIMEOUT,
                    help="Cloud job polling timeout in seconds.")
-    p.add_argument("--remote-crop-rescue", action="store_true",
-                   help="Let the 4th-engine crop rescue run on the cloud "
-                        "backend (one job per red entry — slow). Off by "
-                        "default; the local backend always rescues "
-                        "in-process.")
+    p.add_argument("--crop-rescue", action="store_true",
+                   help="Re-read red entries from their isolated crop "
+                        "(one extra cloud job per red entry — slow).")
     p.add_argument("--min-conf", type=float, default=0.5,
-                   help="Minimum Paddle confidence to emit (default 0.5).")
+                   help="Minimum recognizer confidence to emit (default 0.5).")
     p.add_argument("--threshold", type=float, default=0.95,
-                   help="Review queueing threshold; Paddle entries below "
-                        "this go through 3-engine cross-verify (default 0.95).")
+                   help="Review queueing threshold; entries below this are "
+                        "tiered for review (default 0.95).")
     p.add_argument("--padding", type=int, default=6,
-                   help="Padding around OCR bbox when cropping for "
-                        "cross-verify (default 6).")
+                   help="Padding around an OCR bbox when cropping for the "
+                        "crop rescue (default 6).")
     p.add_argument("--max-entries", type=int, default=50,
                    help="Cap on review entries per page (default 50).")
     p.add_argument("--image-size", default="1280x720",
                    help="Source slide size WxH used by autoclear "
                         "(default 1280x720).")
-    p.add_argument("--high-conf", type=float, default=0.95,
-                   help="Single-engine confidence to trigger D' "
-                        "(yellow tier, default 0.95).")
     p.add_argument("--moderate-conf", type=float, default=0.85,
-                   help="Strongest-engine confidence to trigger G "
-                        "fallback (yellow tier, default 0.85).")
-    p.add_argument("--skip-cross-verify", action="store_true",
-                   help="Skip the 3-engine pass; all review entries will "
-                        "be classified as red. Use for quick local checks.")
+                   help="Confidence at or above which an entry is tiered "
+                        "yellow (default 0.85). Below it, red.")
     p.add_argument("--skip-autoclear", action="store_true",
                    help="Skip the autoclear heuristics pass.")
     return p.parse_args()
@@ -181,18 +148,6 @@ def discover_pages(src_dir: Path, pages_arg: str | None) -> list[str]:
     if pages_arg:
         return [n.strip().zfill(2) for n in pages_arg.split(",")]
     return discover_page_numbers(src_dir)
-
-
-def resolve_backend(args: argparse.Namespace) -> str:
-    """Pick the recognizer: auto prefers the cloud when a token exists."""
-    if args.ocr_backend == "local":
-        return "local"
-    if args.ocr_backend == "remote":
-        return "remote"
-    if (args.ocr_token or os.environ.get("PADDLE_OCR_TOKEN")
-            or ocr_remote.read_config_token()):
-        return "remote"
-    return "local"
 
 
 def remote_token(args: argparse.Namespace) -> str:
@@ -237,53 +192,21 @@ def run_ocr_remote(pairs: list[tuple[Path, Path]], args: argparse.Namespace,
     return counts
 
 
-def run_ocr_batch(ocr, pairs: list[tuple[Path, Path]],
-                  min_conf: float) -> list[int]:
-    """Run PaddleOCR.predict on each (src, out_json) pair; return per-page
-    item counts. The OCR model is reused across pages — this is where
-    the warm-model speedup happens (~3 s startup, ~9 s/page recognition).
-    """
-    counts = []
-    for img_path, out_path in pairs:
-        if not img_path.exists():
-            print(f"  SKIP missing: {img_path}", file=sys.stderr)
-            counts.append(0)
-            continue
-        try:
-            result = ocr.predict(str(img_path))
-        except Exception as exc:
-            print(f"  FAIL {img_path}: {exc}", file=sys.stderr)
-            counts.append(0)
-            continue
-        items = extract_items(result, min_conf)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(
-            json.dumps(items, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        counts.append(len(items))
-        print(f"  {img_path.name} -> {len(items)} items", flush=True)
-    return counts
+def make_crop_rescuer(args: argparse.Namespace, token: str):
+    """Build the crop-rescue callable.
 
-
-def make_remote_rescuer(args: argparse.Namespace, token: str):
-    """Build the 4th-engine crop-rescue callable for the cloud backend.
-
-    Mirrors `ocr_cross_verify.run_paddle_crop` — including its
-    width-based upscaling rule, so both backends ask for more pixels per
-    character on the same crops. Each call is one cloud job, which is
-    why this stays behind --remote-crop-rescue.
+    Mirrors the upscaling rule above so every crop is re-read the same
+    way. Each call is one cloud job, which is why this stays behind
+    --crop-rescue.
     """
     from PIL import Image  # noqa: PLC0415
 
-    from ocr_cross_verify import EnginePred  # noqa: PLC0415
-
-    def rescuer(crop_image) -> EnginePred:
+    def rescuer(crop_image) -> Prediction:
         try:
-            if crop_image.width >= REMOTE_RESCUE_UPSCALE_WIDTH:
+            if crop_image.width >= CROP_RESCUE_UPSCALE_WIDTH:
                 img = crop_image.resize(
-                    (crop_image.width * REMOTE_RESCUE_UPSCALE_FACTOR,
-                     crop_image.height * REMOTE_RESCUE_UPSCALE_FACTOR),
+                    (crop_image.width * CROP_RESCUE_UPSCALE_FACTOR,
+                     crop_image.height * CROP_RESCUE_UPSCALE_FACTOR),
                     Image.LANCZOS,
                 )
             else:
@@ -292,9 +215,9 @@ def make_remote_rescuer(args: argparse.Namespace, token: str):
                 img, token=token, model=args.ocr_model,
                 timeout=args.ocr_timeout,
             )
-            return EnginePred(text, conf)
+            return Prediction(text, conf)
         except Exception:
-            return EnginePred("", 0.0)
+            return Prediction("", 0.0)
 
     return rescuer
 
@@ -302,27 +225,23 @@ def make_remote_rescuer(args: argparse.Namespace, token: str):
 def build_review_packet(ocr_path: Path, image_path: Path, *,
                         out_path: Path, threshold: float,
                         padding: int, max_entries: int,
-                        high_conf: float, moderate_conf: float,
-                        do_cross_verify: bool,
-                        paddle_model=None,
-                        remote_rescuer=None) -> dict:
-    """Run 3-engine cross-verify on low-confidence Paddle entries and
-    write the review packet.
+                        moderate_conf: float,
+                        rescuer=None) -> dict:
+    """Tier the low-confidence entries and write the review packet.
 
     The review JSON's `entries` look like:
         {
           "idx": int,
-          "original_text": str,           # PaddleOCR text
-          "confidence": float,            # PaddleOCR conf
+          "original_text": str,           # recognizer text
+          "confidence": float,            # recognizer conf
           "bbox": [x1, y1, x2, y2],
           "tier": "green" | "yellow" | "red",
-          "reason": str,                  # cross_verify rule that fired
+          "reason": str,                  # the rule that fired
           "candidates": {
-            "paddle":    {"text": ..., "conf": ...},
-            "easyocr":   {"text": ..., "conf": ...},
-            "tesseract": {"text": ..., "conf": ...},
+            "primary": {"text": ..., "conf": ...},
+            "crop":    {"text": ..., "conf": ...},   # only after a rescue
           },
-          "suggested_text": str,          # consensus pick
+          "suggested_text": str,
           "corrected_text": str,          # pre-filled = suggested_text
           "notes": str | None,
         }
@@ -346,7 +265,7 @@ def build_review_packet(ocr_path: Path, image_path: Path, *,
     entries = []
     tier_count = {"green": 0, "yellow": 0, "red": 0}
     rescue_stats = {"attempted": 0, "upgraded": 0}
-    with tempfile.TemporaryDirectory(prefix="xv_") as td:
+    with tempfile.TemporaryDirectory(prefix="tier_") as td:
         td = Path(td)
         for idx, item in candidates_idx:
             x1 = max(0, int(item["x1"]) - padding)
@@ -355,66 +274,38 @@ def build_review_packet(ocr_path: Path, image_path: Path, *,
             y2 = min(H, int(item["y2"]) + padding)
             if x2 <= x1 or y2 <= y1:
                 continue
-            crop_path = td / f"crop_{idx:04d}.png"
-            crop_img = img.crop((x1, y1, x2, y2))
-            crop_img.save(crop_path)
 
-            paddle = EnginePred(item["text"],
-                                float(item.get("confidence", 0.0)))
-            if do_cross_verify:
-                easy = run_easyocr(crop_path)
-                tess = run_tesseract(crop_path)
-                xv = cross_verify(paddle, easy, tess,
-                                  high_conf=high_conf,
-                                  moderate_conf=moderate_conf)
-                # 4th-engine rescue: only on RED entries (the only
-                # case where it can change the outcome), and only if
-                # the caller supplied a recognizer — a warm local
-                # Paddle model, or `remote_rescuer` for the cloud
-                # backend. Re-runs the recognizer on the isolated crop
-                # with width-based upscaling — empirically this
-                # corrects ~30-50% of dense-CJK RED entries.
-                if xv.tier == "red" and (paddle_model is not None
-                                         or remote_rescuer is not None):
-                    rescue_stats["attempted"] += 1
-                    if paddle_model is not None:
-                        paddle_crop_pred = run_paddle_crop(crop_img,
-                                                           paddle_model)
-                    else:
-                        paddle_crop_pred = remote_rescuer(crop_img)
-                    xv_after = paddle_crop_rescue(
-                        xv, paddle_crop_pred, moderate_conf=moderate_conf,
-                    )
-                    if xv_after.tier != xv.tier:
-                        rescue_stats["upgraded"] += 1
-                    xv = xv_after
-            else:
-                # Skipping cross-verify: tag everything red with Paddle's
-                # text as the suggestion. Useful for fast iteration.
-                from ocr_cross_verify import CrossVerifyResult
-                xv = CrossVerifyResult(
-                    tier="red", suggested_text=paddle.text,
-                    reason="cross_verify_skipped",
-                    candidates={
-                        "paddle": {"text": paddle.text,
-                                   "conf": round(paddle.conf, 4)},
-                        "easyocr": {"text": "", "conf": 0.0},
-                        "tesseract": {"text": "", "conf": 0.0},
-                    },
+            primary = Prediction(item["text"],
+                                 float(item.get("confidence", 0.0)))
+            tier = classify(primary, moderate_conf=moderate_conf)
+
+            # The crop re-read only runs on RED entries (the only case
+            # where it can change the outcome) and only when the caller
+            # supplied a rescuer.
+            if tier.tier == "red" and rescuer is not None:
+                crop_path = td / f"crop_{idx:04d}.png"
+                crop_img = img.crop((x1, y1, x2, y2))
+                crop_img.save(crop_path)
+                rescue_stats["attempted"] += 1
+                tier_after = crop_rescue(
+                    tier, rescuer(crop_img), moderate_conf=moderate_conf,
                 )
+                if tier_after.tier != tier.tier:
+                    rescue_stats["upgraded"] += 1
+                tier = tier_after
 
-            tier_count[xv.tier] += 1
+            tier_count[tier.tier] += 1
             entries.append({
                 "idx": idx,
                 "original_text": item["text"],
                 "confidence": float(item.get("confidence", 0.0)),
                 "bbox": [int(item["x1"]), int(item["y1"]),
                          int(item["x2"]), int(item["y2"])],
-                "tier": xv.tier,
-                "reason": xv.reason,
-                "candidates": xv.candidates,
-                "suggested_text": xv.suggested_text,
-                "corrected_text": xv.suggested_text,
+                "tier": tier.tier,
+                "reason": tier.reason,
+                "candidates": tier.candidates,
+                "suggested_text": tier.suggested_text,
+                "corrected_text": tier.suggested_text,
                 "notes": None,
             })
 
@@ -423,7 +314,6 @@ def build_review_packet(ocr_path: Path, image_path: Path, *,
         "source_ocr": str(ocr_path),
         "source_image": str(image_path),
         "threshold": threshold,
-        "high_conf": high_conf,
         "moderate_conf": moderate_conf,
         "padding": padding,
         "tier_counts": tier_count,
@@ -442,8 +332,7 @@ def apply_autoclear(review_path: Path, image_w: int,
 
     Overrides corrected_text to "" for any entry where a rule fires —
     these are decorative/logo OCRs that should be treated as
-    preserved-visual (not editable text), regardless of cross-verify's
-    suggestion.
+    preserved-visual (not editable text), regardless of the suggestion.
     """
     data = json.loads(review_path.read_text(encoding="utf-8"))
     cleared = 0
@@ -486,77 +375,28 @@ def main() -> int:
 
     image_w, image_h = parse_size(args.image_size)
 
-    # ---- Stage 1: OCR (cloud job, or a warm local model) ----
-    backend = resolve_backend(args)
-    token = remote_token(args) if backend == "remote" else ""
-    ocr = None
-    device = None
-    if backend == "local":
-        quiet_paddle()
-        try:
-            from paddleocr import PaddleOCR
-        except ImportError:
-            print("ERROR: paddleocr is not installed and no cloud token is "
-                  "configured. Run `pip install 'paddleocr>=3' "
-                  "'paddlex[ocr]'`, or use the remote backend by passing "
-                  "--ocr-token / setting PADDLE_OCR_TOKEN.",
-                  file=sys.stderr)
-            return 1
-        device = paddle_device()
-
-    print(f"\n=== Stage 1: OCR ({len(nums)} pages, backend={backend}"
-          f"{f', device={device}' if device else ''}) ===", flush=True)
+    # ---- Stage 1: OCR (one cloud job for the whole batch) ----
+    token = remote_token(args)
+    print(f"\n=== Stage 1: OCR ({len(nums)} pages, backend=remote) ===",
+          flush=True)
     t0 = time.time()
     pairs = [(image_paths[n], ocr_dir / f"page_{n}.ocr.json")
              for n in nums]
-    if backend == "remote":
-        counts = run_ocr_remote(pairs, args, token)
-    else:
-        try:
-            ocr = PaddleOCR(
-                lang=args.lang,
-                device=device,
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=False,
-                # Emit per-character bboxes so inventory_to_layout.py can
-                # do per-character color sampling (in-bbox color changes).
-                return_word_box=True,
-            )
-        except Exception as exc:
-            print(f"ERROR: could not start the local PaddleOCR engine: {exc}\n"
-                  f"  The local backend needs the `paddlepaddle` runtime "
-                  f"(pip install paddlepaddle) or a GPU build.\n"
-                  f"  Easiest fix: run the cloud backend instead — pass "
-                  f"--ocr-backend remote (or just configure a token with "
-                  f"--ocr-token / PADDLE_OCR_TOKEN / `editppt config "
-                  f"--paddle-ocr-token`).",
-                  file=sys.stderr)
-            return 1
-        counts = run_ocr_batch(ocr, pairs, args.min_conf)
-    print(f"  {backend} OCR done in {time.time() - t0:.1f}s "
+    counts = run_ocr_remote(pairs, args, token)
+    print(f"  remote OCR done in {time.time() - t0:.1f}s "
           f"({sum(counts)} total detections)", flush=True)
 
-    # ---- Stage 2: cross-verify + review-packet build ----
-    print(f"\n=== Stage 2: 3-engine cross-verify ({len(nums)} pages) ===",
+    # ---- Stage 2: tier + review-packet build ----
+    print(f"\n=== Stage 2: confidence tiering ({len(nums)} pages) ===",
           flush=True)
-    if args.skip_cross_verify:
-        print("  --skip-cross-verify set: all review entries → red",
-              flush=True)
     t1 = time.time()
     total_tier = {"green": 0, "yellow": 0, "red": 0}
     total_rescue = {"attempted": 0, "upgraded": 0}
     review_entry_counts = []
-    # The 4th-engine rescue needs a recognizer: the warm local model from
-    # stage 1, or the cloud service when explicitly allowed (it costs one
-    # job per red entry).
-    use_rescue = not args.skip_cross_verify
-    rescuer = None
-    if use_rescue and backend == "remote" and args.remote_crop_rescue:
-        rescuer = make_remote_rescuer(args, token)
-    elif use_rescue and backend == "remote":
-        print("  note: 4th-engine crop rescue disabled on the remote "
-              "backend (pass --remote-crop-rescue to enable)", flush=True)
+    rescuer = make_crop_rescuer(args, token) if args.crop_rescue else None
+    if not args.crop_rescue:
+        print("  note: crop rescue disabled (pass --crop-rescue to enable)",
+              flush=True)
     for n in nums:
         ocr_path = ocr_dir / f"page_{n}.ocr.json"
         image_path = image_paths[n]
@@ -571,14 +411,8 @@ def main() -> int:
             threshold=args.threshold,
             padding=args.padding,
             max_entries=args.max_entries,
-            high_conf=args.high_conf,
             moderate_conf=args.moderate_conf,
-            do_cross_verify=not args.skip_cross_verify,
-            # Reuse the warm Paddle model from stage 1 for the 4th-engine
-            # rescue pass on RED entries; the remote backend uses the
-            # cloud rescuer instead.
-            paddle_model=ocr if use_rescue else None,
-            remote_rescuer=rescuer,
+            rescuer=rescuer,
         )
         tc = review.get("tier_counts", {})
         rs = review.get("rescue_stats", {})
@@ -587,18 +421,18 @@ def main() -> int:
             total_tier[k] += tc.get(k, 0)
         for k in total_rescue:
             total_rescue[k] += rs.get(k, 0)
-        rescue_note = (f", paddle-crop rescue: {rs.get('upgraded',0)}/"
+        rescue_note = (f", crop rescue: {rs.get('upgraded',0)}/"
                        f"{rs.get('attempted',0)}"
                        if rs.get('attempted', 0) else "")
         print(f"  page {n}: {len(review.get('entries', []))} review entries "
               f"({tc.get('green',0)} 🟢, {tc.get('yellow',0)} 🟡, "
               f"{tc.get('red',0)} 🔴{rescue_note})", flush=True)
-    print(f"  cross-verify done in {time.time() - t1:.1f}s "
+    print(f"  tiering done in {time.time() - t1:.1f}s "
           f"({sum(total_tier.values())} total entries: "
           f"{total_tier['green']} 🟢, {total_tier['yellow']} 🟡, "
           f"{total_tier['red']} 🔴)", flush=True)
     if total_rescue["attempted"]:
-        print(f"  paddle-crop rescue: "
+        print(f"  crop rescue: "
               f"{total_rescue['upgraded']}/{total_rescue['attempted']} "
               f"RED entries upgraded to YELLOW", flush=True)
 
@@ -662,10 +496,10 @@ def main() -> int:
     total_entries = sum(review_entry_counts)
     print("\n=== Summary ===")
     print(f"  {sum(counts)} OCR detections across {len(nums)} pages")
-    print(f"  {total_entries} entries went through 3-engine cross-verify")
-    print(f"    {total_tier['green']} 🟢 strong consensus (accept as-is)")
-    print(f"    {total_tier['yellow']} 🟡 weak consensus (glance to verify)")
-    print(f"    {total_tier['red']} 🔴 no consensus (review carefully)")
+    print(f"  {total_entries} entries were tiered for review")
+    print(f"    {total_tier['green']} 🟢 unreadable (left as picture)")
+    print(f"    {total_tier['yellow']} 🟡 confident (glance to verify)")
+    print(f"    {total_tier['red']} 🔴 low confidence (review carefully)")
     print(f"  {total_cleared} auto-cleared (decorative/logo)")
     remaining = max(0, total_entries - total_cleared)
     print(f"  {remaining} entries have corrected_text pre-filled and ready "
