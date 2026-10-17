@@ -26,6 +26,52 @@ _MODEL_DIR_DEFAULT = (
 )
 
 
+# Families in the classifier's closed set that ship no CJK glyphs. A
+# prediction naming one of these for text containing CJK is always a
+# misclassification (typically a short label whose strokes read as Latin
+# at 128 px), so callers must not apply it.
+_LATIN_ONLY_FAMILIES = frozenset({
+    "Arial", "Calibri", "Cambria", "Times New Roman", "Verdana",
+    "Tahoma", "Consolas", "Aptos", "Corbel", "Helvetica",
+})
+
+# Monospace families in the closed set. Slide body text is proportional;
+# a monospace prediction on a line without code markers is the same
+# short-label failure mode, so it is only honoured for code-like lines.
+_MONOSPACE_FAMILIES = frozenset({"Consolas"})
+_CODE_MARKERS = frozenset("{}[]();=`")
+
+
+def _has_cjk(text: str) -> bool:
+    for ch in text:
+        o = ord(ch)
+        if 0x4E00 <= o <= 0x9FFF:
+            return True
+        if 0x3400 <= o <= 0x4DBF:
+            return True
+        if 0xF900 <= o <= 0xFAFF:
+            return True
+    return False
+
+
+def font_prediction_applies(text: str, family: str | None) -> bool:
+    """Whether a classifier family prediction may be applied to `text`.
+
+    Confidence is checked separately by the caller; this rejects
+    predictions that are structurally impossible regardless of score:
+    Latin-only families on CJK text, and monospace families on
+    non-code prose. Rejected predictions fall back to the default font.
+    """
+    if not family:
+        return False
+    if (family in _MONOSPACE_FAMILIES
+            and not any(m in text for m in _CODE_MARKERS)):
+        return False
+    if family in _LATIN_ONLY_FAMILIES and _has_cjk(text):
+        return False
+    return True
+
+
 def _resolve_paths(model_path: str | Path | None, meta_path: str | Path | None):
     if model_path is None:
         model_path = _MODEL_DIR_DEFAULT / "font_classifier.onnx"

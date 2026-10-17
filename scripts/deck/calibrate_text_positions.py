@@ -539,6 +539,11 @@ def _apply_iteration(layout: dict[str, Any],
             tx1, ty1, tx2, ty2 = (float(v) for v in target)
             if (el.get("align") or "").lower() == "center":
                 dx = ((tx1 + tx2) / 2.0) - ((rx1 + rx2) / 2.0)
+            elif (el.get("align") or "").lower() == "right":
+                # Right-anchored columns pin their right edge to the OCR
+                # column x: compare right edges so the closed loop refines
+                # the anchor instead of dragging it back to the left edge.
+                dx = tx2 - rx2
             else:
                 dx = tx1 - rx1
             if _is_dense_small_text(el, slide):

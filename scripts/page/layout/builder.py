@@ -37,6 +37,7 @@ from layout.icon_alpha import (  # noqa: E402
     _scrub_text_boxes_from_icon_crop,
 )
 from layout.lists import strip_leading_list_markers  # noqa: E402
+from layout.right_align import apply_right_aligned_columns  # noqa: E402
 from layout.outline import (  # noqa: E402
     _outline_should_be_native_shape,
     _outline_should_keep_full_crop,
@@ -728,6 +729,10 @@ class LayoutBuilder:
         # Size unification normalises font-size drift between
         # visually-identical labels (`1000亿元` vs `24.22%`).
         self.text_elements = unify_group_sizes(self.text_elements)
+        # Right-edge columns (bar-chart label stacks) keep their flush
+        # right edge: re-anchor each member's box to the OCR column x so a
+        # render-font width change cannot fan the edges out.
+        self.text_elements = apply_right_aligned_columns(self.text_elements)
         self.image_elements = topo_sort_by_containment(self.image_elements)
 
     def write(self) -> None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections import Counter
 
 from layout.color import _color_close
+from layout.font_predict import font_prediction_applies
 from layout.text_sizing import _is_stat_value
 
 
@@ -129,7 +130,17 @@ def unify_group_sizes(text_records: list[dict]) -> list[dict]:
         ]
         if not confident:
             continue
-        fam_counts = Counter(out[i]["font_pred"]["family"] for i in confident)
+        fam_counts = Counter(
+            out[i]["font_pred"]["family"]
+            for i in confident
+            if font_prediction_applies(out[i]["text"],
+                                       out[i]["font_pred"]["family"])
+        )
+        if not fam_counts:
+            # Every confident prediction is structurally impossible for its
+            # own text (e.g. monospace on prose): leave the bucket on the
+            # default font rather than propagating the bad family.
+            continue
         # italic was applied to the record itself by text_emit when the
         # prediction was confident, so we read it from the top-level field.
         ital_counts = Counter(bool(out[i].get("italic", False))

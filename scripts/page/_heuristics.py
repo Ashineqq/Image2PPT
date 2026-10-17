@@ -412,38 +412,44 @@ def is_likely_icon(item: dict, all_items: list[dict],
     # Short glyph inside a light-background outlined icon. This catches
     # symbols like `￥` inside a circle/hexagon: the glyph bbox itself has
     # white bg, so the colored-region rule below cannot see the container.
+    # High-confidence CJK readings are real text, not icon glyphs — an
+    # icon-internal symbol never survives PP-OCRv5 at >= 0.95 while axis
+    # labels and short category names routinely do.
     if len(text) <= 2 and max(cw, ch) <= s_length(45, scale):
-        h, w = img.shape[:2]
-        pad = max(s_length(8, scale), int(max(cw, ch) * 0.8))
-        x1 = max(0, item["x1"] - pad)
-        y1 = max(0, item["y1"] - pad)
-        x2 = min(w, item["x2"] + pad)
-        y2 = min(h, item["y2"] + pad)
-        crop = img[y1:y2, x1:x2]
-        if crop.size:
-            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-            fg = (gray < 235) | (hsv[:, :, 1] > 28)
-            ix1 = max(0, item["x1"] - x1 - 1)
-            iy1 = max(0, item["y1"] - y1 - 1)
-            ix2 = min(fg.shape[1], item["x2"] - x1 + 1)
-            iy2 = min(fg.shape[0], item["y2"] - y1 + 1)
-            if ix2 > ix1 and iy2 > iy1:
-                side_hit_threshold = s_area(5, scale)
-                outer_hit_threshold = s_area(18, scale)
-                side_hits = 0
-                if int(fg[:iy1, ix1:ix2].sum()) >= side_hit_threshold:
-                    side_hits += 1
-                if int(fg[iy2:, ix1:ix2].sum()) >= side_hit_threshold:
-                    side_hits += 1
-                if int(fg[iy1:iy2, :ix1].sum()) >= side_hit_threshold:
-                    side_hits += 1
-                if int(fg[iy1:iy2, ix2:].sum()) >= side_hit_threshold:
-                    side_hits += 1
-                outer = fg.copy()
-                outer[iy1:iy2, ix1:ix2] = False
-                if side_hits >= 3 and int(outer.sum()) >= outer_hit_threshold:
-                    return True, "outlined_icon_glyph"
+        if any("\u4e00" <= ch <= "\u9fff" for ch in text) and conf >= 0.95:
+            pass
+        else:
+            h, w = img.shape[:2]
+            pad = max(s_length(8, scale), int(max(cw, ch) * 0.8))
+            x1 = max(0, item["x1"] - pad)
+            y1 = max(0, item["y1"] - pad)
+            x2 = min(w, item["x2"] + pad)
+            y2 = min(h, item["y2"] + pad)
+            crop = img[y1:y2, x1:x2]
+            if crop.size:
+                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+                fg = (gray < 235) | (hsv[:, :, 1] > 28)
+                ix1 = max(0, item["x1"] - x1 - 1)
+                iy1 = max(0, item["y1"] - y1 - 1)
+                ix2 = min(fg.shape[1], item["x2"] - x1 + 1)
+                iy2 = min(fg.shape[0], item["y2"] - y1 + 1)
+                if ix2 > ix1 and iy2 > iy1:
+                    side_hit_threshold = s_area(5, scale)
+                    outer_hit_threshold = s_area(18, scale)
+                    side_hits = 0
+                    if int(fg[:iy1, ix1:ix2].sum()) >= side_hit_threshold:
+                        side_hits += 1
+                    if int(fg[iy2:, ix1:ix2].sum()) >= side_hit_threshold:
+                        side_hits += 1
+                    if int(fg[iy1:iy2, :ix1].sum()) >= side_hit_threshold:
+                        side_hits += 1
+                    if int(fg[iy1:iy2, ix2:].sum()) >= side_hit_threshold:
+                        side_hits += 1
+                    outer = fg.copy()
+                    outer[iy1:iy2, ix1:ix2] = False
+                    if side_hits >= 3 and int(outer.sum()) >= outer_hit_threshold:
+                        return True, "outlined_icon_glyph"
     # Text inside SMALL square colored region (icon-internal labels)
     pad = s_length(5, scale)
     samples = []

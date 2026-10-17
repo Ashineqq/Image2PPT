@@ -798,7 +798,44 @@ def erase_text(
         stroke_bool = stroke.astype(bool)
         out[y1:y2, x1:x2][stroke_bool] = bg.astype(np.uint8)
         mask[y1:y2, x1:x2] = stroke * 255
+    out = _restore_pale_border_runs(img, out)
     return out, mask, decisions
+
+
+def _restore_pale_border_runs(img: np.ndarray, cleaned: np.ndarray) -> np.ndarray:
+    """Restore pale straight border runs the stroke pass erased.
+
+    Legend frames and card borders are often a faint gray (~15-60 away
+    from the canvas bg) that falls inside a text bbox's paint window when
+    the label hugs the frame. Re-detect >= 30 px straight horizontal /
+    vertical runs of that gray band in the SOURCE and copy those pixels
+    back, so the frame survives while dark text strokes stay erased.
+    """
+    out = cleaned
+    h, w = img.shape[:2]
+    if h < 30 or w < 30:
+        return out
+    patch = max(8, min(h, w) // 16)
+    corners = np.concatenate([
+        img[:patch, :patch].reshape(-1, 3),
+        img[:patch, w - patch:w].reshape(-1, 3),
+        img[h - patch:h, :patch].reshape(-1, 3),
+        img[h - patch:h, w - patch:w].reshape(-1, 3),
+    ])
+    bg = np.median(corners.astype(float), axis=0)
+    diff = np.abs(img.astype(float) - bg).max(axis=2)
+    band = ((diff >= 15) & (diff <= 60)).astype(np.uint8) * 255
+    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 1))
+    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 30))
+    lines = cv2.morphologyEx(band, cv2.MORPH_OPEN, hk) | cv2.morphologyEx(
+        band, cv2.MORPH_OPEN, vk)
+    ys, xs = np.where(lines > 0)
+    if len(ys) == 0:
+        return out
+    changed = np.abs(out.astype(int) - img.astype(int)).max(axis=2) > 3
+    restore = (lines > 0) & changed
+    out[restore] = img[restore]
+    return out
 
 
 # =============================================================================

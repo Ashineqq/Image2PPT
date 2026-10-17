@@ -137,7 +137,19 @@ def detect_text_style(bbox: list[int], orig_img: np.ndarray,
             return {"color": "#054798", "bold": False}
 
     text_pixels = region[text_mask]
-    m = np.median(text_pixels, axis=0).astype(int)
+    # Antialiased fringes outnumber the stroke core on thin glyphs and
+    # drag the median into a lighter gray, splitting one visual gray into
+    # a dozen hexes. Re-sample the darker half of the mask — but only
+    # when it stays in the same light/dark family: truly black text must
+    # not wash out to gray.
+    m_all = np.median(text_pixels, axis=0).astype(int)
+    lum_all = int(m_all.astype(int).max())
+    lum = text_pixels.astype(int).max(axis=1)
+    k = max(8, int(len(lum) / 2))
+    core = text_pixels[np.argpartition(lum, k - 1)[:k]]
+    m_core = np.median(core, axis=0).astype(int)
+    lum_core = int(m_core.astype(int).max())
+    m = m_core if (lum_all < 110) == (lum_core < 110) else m_all
     b, g, r = int(m[0]), int(m[1]), int(m[2])
     color = _classify_text_color(r, g, b, bg)
     # Raw RGB hex of the line median: keeps the same colour SPACE as

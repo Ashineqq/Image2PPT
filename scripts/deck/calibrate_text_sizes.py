@@ -764,6 +764,18 @@ def _apply_iteration(layout: dict[str, Any],
             colour = colours.get((s_idx, t_idx))
             if colour is None or el.get("size") is None:
                 continue
+            if (el.get("align") or "").lower() == "right":
+                # Right-anchored label columns carry their unified size
+                # from layout (apply_right_aligned_columns): per-glyph
+                # ink-height fitting would scatter them again.
+                report.append({
+                    "slide": s_idx + 1,
+                    "iteration": iteration,
+                    "name": el.get("name"),
+                    "text": el.get("text"),
+                    "status": "skipped",
+                })
+                continue
             px1, py1, px2, py2 = _box_to_preview(el["box"], scale, ox, oy)
             box_w = max(1, px2 - px1)
             box_h = max(1, py2 - py1)

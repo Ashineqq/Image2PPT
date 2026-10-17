@@ -6,6 +6,7 @@ and orchestration.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -29,7 +30,10 @@ from layout.text_sizing import (
     _unify_run_sizes_by_color,
     font_size_pt,
 )
-from layout.font_predict import predict_font_from_bbox
+from layout.font_predict import (
+    font_prediction_applies,
+    predict_font_from_bbox,
+)
 from layout.text_style import detect_text_style
 
 # When the ML font classifier returns family confidence below this floor we
@@ -135,10 +139,22 @@ def _emit_text_element_record(
     ppt_font = default_ppt_font()
     text_bold = bool(style["bold"])
     text_italic = False
+    # Escape hatch for A/B runs: IMAGE2PPT_FORCE_FONT pins every text
+    # element to one family, skipping both the classifier and the group
+    # propagation in grouping.py (which honours an already-pinned font).
+    forced_font = os.environ.get("IMAGE2PPT_FORCE_FONT", "").strip()
+    if forced_font:
+        ppt_font = forced_font
+        font_pred = None
     # ML font classifier (ResNet-34 INT8 ONNX). The family head is only
     # trusted when confident — visually similar families make a low-confidence
-    # guess worse than the heuristic default.
-    if font_pred is not None and font_pred["family_confidence"] >= _FONT_CONF_THRESHOLD:
+    # guess worse than the heuristic default. Structurally impossible
+    # predictions (Latin-only family on CJK text, monospace on prose) are
+    # rejected regardless of confidence and fall back to the default font.
+    if (font_pred is not None
+            and font_pred["family_confidence"] >= _FONT_CONF_THRESHOLD
+            and font_prediction_applies(safe_text,
+                                        font_pred.get("family"))):
         ppt_font = font_pred["family"]
         text_italic = bool(font_pred["is_italic"])
     # Bold has its own head, so it is decided on its own confidence rather
