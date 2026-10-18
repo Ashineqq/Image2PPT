@@ -54,8 +54,10 @@ from pathlib import Path
 SCRIPTS_ROOT = Path(__file__).resolve().parent      # .../scripts
 sys.path.insert(0, str(SCRIPTS_ROOT / "page"))
 sys.path.insert(0, str(SCRIPTS_ROOT / "tables"))
+sys.path.insert(0, str(SCRIPTS_ROOT / "verify"))
 
 import run_pipeline as rp  # noqa: E402
+import render_preview  # noqa: E402
 from image_sources import supported_image_formats  # noqa: E402
 from shared.console import run_capture, use_safe_console  # noqa: E402
 
@@ -375,6 +377,19 @@ def main() -> int:
         if not _interactive_gate(args, "classify", artifacts=[slot_report]):
             return 0
 
+    # Preview-based calibration and the preview render both need LibreOffice
+    # + poppler. Check once, up front: discovering it inside a stage makes a
+    # missing install look like a crash, and the deck builds fine without
+    # them — text sizes and positions simply stay as the layout predicts.
+    missing_render = render_preview.missing_tools()
+    if missing_render:
+        sys.stderr.write(
+            f"WARNING: {', '.join(missing_render)} not installed — skipping "
+            "preview-based calibration and preview rendering. The PPTX is "
+            "still built. Install LibreOffice + poppler for the full "
+            "closed loop.\n"
+        )
+
     # In text-only mode the cleaned PNG already carries the
     # original glyphs visually, so even if our overlay sizing is off
     # by a few points it doesn't move ink underneath. Calibration is
@@ -384,6 +399,8 @@ def main() -> int:
         (not args.skip_render)
         if args.calibrate_text is None else args.calibrate_text
     )
+    if missing_render:
+        should_calibrate = False
 
     # ---- Stage 3: build_pptx_from_layout ----
     # When calibrating, calibration scripts only consume the layout JSON
@@ -530,7 +547,7 @@ def main() -> int:
         return 0
 
     # ---- Stage 5: render_preview ----
-    if not args.skip_render:
+    if not args.skip_render and not missing_render:
         banner("5/5  render_preview (PPTX -> PDF -> PNG)")
         ts = time.time()
         previews_dir.mkdir(parents=True, exist_ok=True)
@@ -553,13 +570,16 @@ def main() -> int:
                 "         (LibreOffice / pdftoppm may not be installed.)\n"
             )
         print(f"  stage 5 done in {time.time() - ts:.1f}s", flush=True)
+    elif missing_render and not args.skip_render:
+        banner("5/5  render_preview SKIPPED "
+               f"({' + '.join(missing_render)} not installed)")
     else:
         banner("5/5  render_preview SKIPPED")
 
     print(f"\n=== build_deck total: {time.time() - t_total:.1f}s ===")
     print(f"  PPTX:     {pptx_path}")
     print(f"  QA:       {qa_path}")
-    if not args.skip_render:
+    if not args.skip_render and not missing_render:
         print(f"  Previews: {previews_dir}/")
 
     # ---- Post-build: OCR review opportunity summary ----

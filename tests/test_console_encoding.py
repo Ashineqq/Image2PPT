@@ -48,6 +48,23 @@ class RunCaptureTests(unittest.TestCase):
             run_capture([sys.executable, "-c", "raise SystemExit(3)"],
                         check=True)
 
+    def test_failing_child_echoes_its_output(self) -> None:
+        """A bare "exit status 1" hid a missing LibreOffice behind an
+        unexplained mid-build crash, so the child's output is surfaced."""
+        import io
+        from contextlib import redirect_stderr
+        code = ("import sys; print('部分输出'); "
+                "sys.stderr.write('ERROR: soffice not found\\n'); "
+                "raise SystemExit(1)")
+        capture = io.StringIO()
+        with redirect_stderr(capture):
+            with self.assertRaises(Exception):
+                run_capture([sys.executable, "-c", code], check=True)
+        echoed = capture.getvalue()
+        self.assertIn("部分输出", echoed)
+        self.assertIn("soffice not found", echoed)
+        self.assertIn("exit 1", echoed)
+
 
 class EnvTests(unittest.TestCase):
     def test_utf8_env_pins_the_child_stdio_encoding(self) -> None:

@@ -53,16 +53,38 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def which(name: str, override: str | None) -> str:
+# Tools the calibration + preview stages shell out to. Both are optional —
+# a deck can be built without them — but each needs the other to be useful.
+RENDER_TOOLS = ("soffice", "pdftoppm")
+# macOS LibreOffice ships inside an .app bundle that may not be on PATH.
+MAC_SOFFICE = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+
+
+def find_tool(name: str, override: str | None = None) -> str | None:
+    """Path to a render tool, or None when it is not installed."""
     if override:
         return override
     found = shutil.which(name)
+    if found:
+        return found
+    if name == "soffice" and Path(MAC_SOFFICE).exists():
+        return MAC_SOFFICE
+    return None
+
+
+def missing_tools() -> list:
+    """Render tools that are not installed, in a stable order.
+
+    Callers use this to skip calibration and previews up front: both need
+    LibreOffice + poppler, and discovering that mid-build costs a whole
+    stage and produces a confusing failure instead of a clear skip.
+    """
+    return [name for name in RENDER_TOOLS if find_tool(name) is None]
+
+
+def which(name: str, override: str | None) -> str:
+    found = find_tool(name, override)
     if not found:
-        # macOS LibreOffice ships inside an .app bundle that may not be on PATH.
-        if name == "soffice":
-            mac_default = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
-            if Path(mac_default).exists():
-                return mac_default
         raise SystemExit(f"ERROR: {name!r} not found on PATH. "
                          f"Install it or pass --{name}.")
     return found

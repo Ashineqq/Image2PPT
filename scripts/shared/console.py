@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 
 def use_safe_console() -> None:
@@ -45,9 +46,36 @@ def run_capture(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     Use this instead of ``capture_output=True, text=True``: the locale codec
     that ``text=True`` implies is what broke on Windows. Anything the child
     writes that is not valid UTF-8 is replaced rather than fatal.
+
+    A failing child echoes its captured output to our stderr before the
+    error propagates: a bare "exit status 1" hides the reason, which is how
+    a missing LibreOffice once looked like an unexplained crash mid-build.
     """
     kwargs.setdefault("capture_output", True)
     kwargs.setdefault("encoding", "utf-8")
     kwargs.setdefault("errors", "replace")
     kwargs.setdefault("env", utf8_env())
-    return subprocess.run(cmd, **kwargs)
+    try:
+        return subprocess.run(cmd, **kwargs)
+    except subprocess.CalledProcessError as exc:
+        _echo_child_output(cmd, exc)
+        raise
+
+
+def _echo_child_output(cmd: list[str], exc: subprocess.CalledProcessError) -> None:
+    """Surface a failed child's captured output on our own stderr."""
+    out = (exc.stdout or "").strip()
+    err = (exc.stderr or "").strip()
+    if not out and not err:
+        return
+    name = Path(cmd[0]).name if cmd else "child"
+    parts = [f"\n--- {name} output (exit {exc.returncode}) ---"]
+    parts.extend(chunk for chunk in (out, err) if chunk)
+    parts.append(f"--- end of {name} output ---\n")
+    message = "\n".join(parts)
+    try:
+        sys.stderr.write(message)
+    except UnicodeEncodeError:
+        # The message itself must never be the thing that fails; on a legacy
+        # code page fall back to a lossy but writable rendering.
+        sys.stderr.write(message.encode("ascii", "replace").decode("ascii"))
