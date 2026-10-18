@@ -57,7 +57,7 @@ sys.path.insert(0, str(SCRIPTS_ROOT / "tables"))
 
 import run_pipeline as rp  # noqa: E402
 from image_sources import supported_image_formats  # noqa: E402
-from shared.console import use_safe_console  # noqa: E402
+from shared.console import run_capture, use_safe_console  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -330,11 +330,11 @@ def main() -> int:
     # ---- Stage 2: combine_layouts ----
     banner("2/5  combine_layouts")
     ts = time.time()
-    r = subprocess.run(
+    r = run_capture(
         [sys.executable, str(SCRIPTS_ROOT / "deck" / "combine_layouts.py"),
          "--layouts", str(layouts_dir),
          "--out", str(combined_path)],
-        check=True, capture_output=True, text=True,
+        check=True,
     )
     print(r.stdout.strip())
     print(f"  stage 2 done in {time.time() - ts:.1f}s", flush=True)
@@ -355,7 +355,7 @@ def main() -> int:
         banner("2b/5  classify_text_slots")
         ts = time.time()
         slot_report = work / "debug" / "text_slot_classes.json"
-        r = subprocess.run(
+        r = run_capture(
             [sys.executable,
              str(SCRIPTS_ROOT / "deck" / "classify_text_slots.py"),
              "--layout", str(combined_path),
@@ -363,7 +363,7 @@ def main() -> int:
              "--apply",
              "--min-group-size", "2",
              "--min-apply-size", "3"],
-            check=True, capture_output=True, text=True,
+            check=True,
         )
         if r.stdout.strip():
             print(r.stdout.strip())
@@ -396,13 +396,13 @@ def main() -> int:
     else:
         banner("3/5  build_pptx_from_layout")
         ts = time.time()
-        r = subprocess.run(
+        r = run_capture(
             [sys.executable,
              str(SCRIPTS_ROOT / "deck" / "build_pptx_from_layout.py"),
              "--layout", str(combined_path),
              "--assets-root", str(work),
              "--out", str(pptx_path)],
-            check=True, capture_output=True, text=True,
+            check=True,
         )
         if r.stdout.strip():
             print(r.stdout.strip())
@@ -413,7 +413,7 @@ def main() -> int:
     if should_calibrate:
         banner("3b/5  calibrate_text_sizes")
         ts = time.time()
-        r = subprocess.run(
+        r = run_capture(
             [sys.executable,
              str(SCRIPTS_ROOT / "deck" / "calibrate_text_sizes.py"),
              "--layout", str(combined_path),
@@ -421,12 +421,12 @@ def main() -> int:
              "--work-dir", str(work),
              "--assets-root", str(work),
              "--iterations", str(args.font_calibration_iterations)],
-            check=True, capture_output=True, text=True,
+            check=True,
         )
         if r.stdout.strip():
             print(r.stdout.strip())
         slot_report = work / "debug" / "text_slot_classes.after_size.json"
-        r = subprocess.run(
+        r = run_capture(
             [sys.executable,
              str(SCRIPTS_ROOT / "deck" / "classify_text_slots.py"),
              "--layout", str(combined_path),
@@ -434,7 +434,7 @@ def main() -> int:
              "--apply",
              "--min-group-size", "2",
              "--min-apply-size", "3"],
-            check=True, capture_output=True, text=True,
+            check=True,
         )
         if r.stdout.strip():
             print(r.stdout.strip())
@@ -446,7 +446,7 @@ def main() -> int:
 
         banner("3c/5  calibrate_text_positions")
         ts = time.time()
-        r = subprocess.run(
+        r = run_capture(
             [sys.executable,
              str(SCRIPTS_ROOT / "deck" / "calibrate_text_positions.py"),
              "--layout", str(combined_path),
@@ -455,12 +455,12 @@ def main() -> int:
              "--assets-root", str(work),
              "--iterations", str(args.calibration_iterations),
              "--max-shift", str(args.calibration_max_shift)],
-            check=True, capture_output=True, text=True,
+            check=True,
         )
         if r.stdout.strip():
             print(r.stdout.strip())
         slot_report = work / "debug" / "text_slot_classes.after_position.json"
-        r = subprocess.run(
+        r = run_capture(
             [sys.executable,
              str(SCRIPTS_ROOT / "deck" / "classify_text_slots.py"),
              "--layout", str(combined_path),
@@ -468,18 +468,18 @@ def main() -> int:
              "--apply",
              "--min-group-size", "2",
              "--min-apply-size", "3"],
-            check=True, capture_output=True, text=True,
+            check=True,
         )
         if r.stdout.strip():
             print(r.stdout.strip())
         print(f"  -> {slot_report}")
-        r = subprocess.run(
+        r = run_capture(
             [sys.executable,
              str(SCRIPTS_ROOT / "deck" / "build_pptx_from_layout.py"),
              "--layout", str(combined_path),
              "--assets-root", str(work),
              "--out", str(pptx_path)],
-            check=True, capture_output=True, text=True,
+            check=True,
         )
         if r.stdout.strip():
             print(r.stdout.strip())
@@ -505,11 +505,11 @@ def main() -> int:
     # ---- Stage 4: inspect_pptx ----
     banner("4/5  inspect_pptx")
     ts = time.time()
-    r = subprocess.run(
+    r = run_capture(
         [sys.executable, str(SCRIPTS_ROOT / "verify" / "inspect_pptx.py"),
          "--pptx", str(pptx_path),
          "--report", str(qa_path)],
-        check=True, capture_output=True, text=True,
+        check=True,
     )
     print(r.stdout.strip())
     print(f"  stage 4 done in {time.time() - ts:.1f}s", flush=True)
@@ -539,11 +539,11 @@ def main() -> int:
         try:
             # render_preview writes <out-dir>/previews/page-NN.png,
             # so we point --out-dir at <work> to land at <work>/previews/.
-            r = subprocess.run(
+            r = run_capture(
                 [sys.executable, str(SCRIPTS_ROOT / "verify" / "render_preview.py"),
                  "--pptx", str(pptx_path),
                  "--out-dir", str(work)],
-                check=True, capture_output=True, text=True,
+                check=True,
             )
             if r.stdout.strip():
                 print(r.stdout.strip())

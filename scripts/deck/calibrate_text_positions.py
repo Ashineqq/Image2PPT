@@ -584,7 +584,8 @@ def _apply_iteration(layout: dict[str, Any],
 
 
 def _run(cmd: list[str]) -> None:
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    subprocess.run(cmd, check=True, capture_output=True, text=True,
+                   errors="replace")
 
 
 def _build_pptx(layout_path: Path, out_path: Path,

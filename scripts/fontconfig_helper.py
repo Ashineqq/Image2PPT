@@ -95,6 +95,7 @@ def fontconfig_font_path(query: str) -> str | None:
             check=True,
             capture_output=True,
             text=True,
+            errors="replace",
             env=fontconfig_env(),
         )
     except (OSError, subprocess.CalledProcessError):
