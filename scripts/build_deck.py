@@ -57,6 +57,7 @@ sys.path.insert(0, str(SCRIPTS_ROOT / "tables"))
 
 import run_pipeline as rp  # noqa: E402
 from image_sources import supported_image_formats  # noqa: E402
+from shared.console import use_safe_console  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -217,6 +218,7 @@ def banner(title: str) -> None:
 
 
 def main() -> int:
+    use_safe_console()
     args = parse_args()
     work = Path(args.work_dir)
     src = Path(args.source_dir)

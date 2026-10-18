@@ -15,6 +15,7 @@ from image_sources import (
     discover_page_images,
     supported_image_formats,
 )
+from shared.console import use_safe_console
 
 
 SCRIPTS_ROOT = Path(__file__).resolve().parent
@@ -192,6 +193,7 @@ def run(cmd: list[str]) -> None:
 
 
 def main() -> int:
+    use_safe_console()
     args = parse_args()
     source = Path(args.source).expanduser()
     work = Path(args.work_dir).expanduser() if args.work_dir else default_work_dir(source, args.name)

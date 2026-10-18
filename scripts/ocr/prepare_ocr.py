@@ -78,6 +78,7 @@ import ocr_remote  # noqa: E402
 from ocr_review_autoclear import match_rule, parse_size  # noqa: E402
 from ocr_tier import Prediction, classify, crop_rescue  # noqa: E402
 from render_annotated_review import render_annotated_page  # noqa: E402
+from shared.console import use_safe_console  # noqa: E402
 
 
 # Crop-rescue upscaling rule: long lines get more pixels per character,
@@ -357,6 +358,7 @@ def apply_autoclear(review_path: Path, image_w: int,
 
 
 def main() -> int:
+    use_safe_console()
     args = parse_args()
     src_dir = Path(args.source_dir)
     work = Path(args.work_dir)

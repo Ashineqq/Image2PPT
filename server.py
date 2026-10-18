@@ -379,6 +379,10 @@ def run_job(job_id: str) -> None:
         if job["options"].get("mode", "full") != "full":
             cmd += ["--mode", job["options"]["mode"]]
         env = os.environ.copy()
+        # A Windows pipe defaults to a legacy code page (GBK on zh-CN) that
+        # cannot encode the pipeline's emoji, which used to kill the child.
+        # Force UTF-8 out of the child and decode the pipe as UTF-8 here.
+        env.setdefault("PYTHONIOENCODING", "utf-8")
         if job["options"].get("ocr_token"):
             env["PADDLE_OCR_TOKEN"] = job["options"]["ocr_token"]
 
@@ -387,7 +391,8 @@ def run_job(job_id: str) -> None:
         with open(log_path, "a", encoding="utf-8") as lf:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, cwd=str(ROOT), env=env, bufsize=1,
+                encoding="utf-8", errors="replace",
+                cwd=str(ROOT), env=env, bufsize=1,
             )
             assert proc.stdout is not None
             for line in proc.stdout:
