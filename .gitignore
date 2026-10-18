@@ -39,3 +39,13 @@ __pycache__/
 
 # Rendered QA intermediates
 *.pdf
+
+# Local web UI state: uploaded pages (user content), run dirs, and the
+# remembered prefs — .prefs.json holds the OCR token in plain text, so it
+# must never be committed.
+node_modules/
+.web_uploads/
+.web_work/
+.web_jobs.json
+.prefs.json
+.server_config.json

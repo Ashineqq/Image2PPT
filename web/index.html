@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Image2PPT · 拖图转 PPT</title>
+<style>
+  :root { --bg:#f4f6fb; --card:#fff; --ink:#1a2030; --muted:#68718a;
+          --line:#e3e8f2; --accent:#2563eb; --accent-d:#1d4fd7; --ok:#15803d; --err:#b91c1c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:var(--bg); color:var(--ink); }
+  .wrap { max-width:860px; margin:32px auto 64px; padding:0 20px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:14px; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:20px; margin-bottom:16px; box-shadow:0 1px 3px rgba(16,24,40,.05); }
+  .card h2 { font-size:15px; margin:0 0 12px; }
+  #drop { border:2px dashed #b6c2d8; border-radius:12px; padding:44px 20px; text-align:center;
+          color:var(--muted); background:#fafbfe; cursor:pointer; transition:.15s; }
+  #drop.over { border-color:var(--accent); background:#eef4ff; color:var(--accent); }
+  #drop strong { display:block; font-size:17px; color:var(--ink); margin-bottom:6px; }
+  #filelist { margin:12px 0 0; padding:0; list-style:none; font-size:13px;
+              display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:10px; }
+  #filelist li { position:relative; border:1px solid var(--line); border-radius:10px;
+                 overflow:hidden; background:#fff; }
+  #filelist img.thumb { width:100%; height:110px; object-fit:cover; display:block; background:#eef1f7; }
+  #filelist .pdfthumb { width:100%; height:110px; display:flex; align-items:center; justify-content:center;
+                 background:#fef3c7; color:#92400e; font-size:13px; font-weight:600; }
+  #filelist .meta { padding:6px 8px; font-size:11px; color:var(--muted);
+                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #filelist .order { position:absolute; top:6px; left:6px; background:rgba(16,24,40,.75); color:#fff;
+                 font-size:11px; border-radius:6px; padding:2px 7px; }
+  #filelist .rm { position:absolute; top:4px; right:4px; width:24px; height:24px; border-radius:50%;
+                 border:none; background:rgba(16,24,40,.7); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+  #filelist .rm:hover { background:var(--err); }
+  #filelist .move { display:flex; border-top:1px solid var(--line); }
+  #filelist .move button { flex:1; border:none; background:none; cursor:pointer;
+                 font-size:12px; padding:5px 0; color:var(--accent); }
+  #filelist .move button:hover { background:#eef4ff; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  label { font-size:13px; color:var(--muted); }
+  input[type=text], input[type=password] { border:1px solid var(--line); border-radius:8px;
+      padding:9px 12px; font-size:14px; }
+  button.primary { background:var(--accent); color:#fff; border:none; border-radius:10px;
+      padding:11px 26px; font-size:15px; cursor:pointer; }
+  button.primary:hover { background:var(--accent-d); }
+  button.primary:disabled { background:#9db4e4; cursor:wait; }
+  button.ghost { background:#fff; border:1px solid var(--line); border-radius:8px;
+      padding:8px 14px; font-size:13px; cursor:pointer; color:var(--ink); }
+  button.ghost:hover { background:#eef4ff; border-color:var(--accent); }
+  .opts { display:flex; gap:18px; flex-wrap:wrap; font-size:13px; color:var(--muted); }
+  .opts label { display:flex; gap:6px; align-items:center; cursor:pointer; color:var(--ink); }
+  #status { font-size:14px; margin-top:14px; }
+  #status.done { color:var(--ok); }
+  #status.error { color:var(--err); }
+  #bar { height:10px; border-radius:6px; background:#e8ecf4; overflow:hidden;
+         margin-top:12px; display:none; }
+  #barFill { height:100%; width:0%; border-radius:6px;
+         background:linear-gradient(90deg,#2563eb,#60a5fa); transition:width .5s; }
+  #barLabel { font-size:13px; color:var(--muted); margin-top:6px; display:none; }
+  #log { background:#101527; color:#c9d4ea; border-radius:10px; padding:14px;
+         font:12px/1.7 ui-monospace,Menlo,Consolas,monospace; max-height:320px;
+         overflow:auto; white-space:pre-wrap; word-break:break-all; margin-top:12px; display:none; }
+  #download { display:none; margin-top:12px; gap:10px; }
+  .hint { font-size:12px; color:var(--muted); margin-top:8px; }
+  #jobs { font-size:13px; list-style:none; padding:0; margin:0; }
+  #jobs li { padding:9px 0; border-bottom:1px solid var(--line); }
+  #jobs li:last-child { border-bottom:none; }
+  #jobs .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:7px; }
+  #jobs .actions button { font-size:12px; padding:6px 12px; }
+  #jobs a { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Image2PPT · 拖图转 PPT</h1>
+  <div class="sub">拖入多张图片（或单个 PDF），按拖入顺序合成一个可编辑 PPT。转换在本地流水线执行，OCR 会调用云端识别。</div>
+
+  <div class="card">
+    <h2>1 · 选择图片</h2>
+    <div id="drop"><strong>把图片拖到这里</strong><span>支持 PNG / JPG / WebP / BMP / TIFF，或单个 PDF · 也可点击选择</span></div>
+    <input type="file" id="picker" multiple accept=".png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,.pdf" hidden>
+    <ul id="filelist"></ul>
+    <div class="hint" id="dupHint"></div>
+  </div>
+
+  <div class="card">
+    <h2>2 · 选项</h2>
+    <div class="opts">
+      <label>输出文件名 <input type="text" id="deckName" placeholder="deck_日期" style="width:150px"></label>
+      <label>OCR Token <input type="password" id="ocrToken" placeholder="不填则用环境变量/配置文件" style="width:220px"></label>
+      <label><input type="checkbox" id="detectTables"> 识别表格</label>
+      <label><input type="checkbox" id="textOnly"> 极速模式（文字+底图）</label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3 · 转换</h2>
+    <button class="primary" id="go">开始转换</button>
+    <div id="bar"><div id="barFill"></div></div>
+    <div id="barLabel"></div>
+    <div id="status"></div>
+    <div id="download" class="row">
+      <button class="primary" id="saveAsBtn">保存 PPTX 到…</button>
+      <button class="ghost" id="openPptBtn" style="display:none">打开 PPT 文件夹</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <div class="card">
+    <h2>最近任务</h2>
+    <ul id="jobs"><li style="color:#999">暂无</li></ul>
+  </div>
+</div>
+
+<script>
+const drop = document.getElementById('drop');
+const picker = document.getElementById('picker');
+const filelist = document.getElementById('filelist');
+const dupHint = document.getElementById('dupHint');
+const files = [];  // 保持拖入顺序
+
+function fileKey(f) { return f.name + '|' + f.size + '|' + f.lastModified; }
+function thumbURL(f) {
+  if (!f._url) f._url = URL.createObjectURL(f);
+  return f._url;
+}
+function clearFiles() {
+  files.forEach(f => { if (f._url) URL.revokeObjectURL(f._url); });
+  files.length = 0;
+  dupHint.textContent = '';
+  renderFiles();
+}
+function renderFiles() {
+  filelist.innerHTML = '';
+  files.forEach((f, i) => {
+    const li = document.createElement('li');
+    const order = document.createElement('span');
+    order.className = 'order'; order.textContent = i + 1;
+    li.appendChild(order);
+    if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
+      const ph = document.createElement('div');
+      ph.className = 'pdfthumb'; ph.textContent = 'PDF';
+      li.appendChild(ph);
+    } else {
+      const img = document.createElement('img');
+      img.className = 'thumb'; img.src = thumbURL(f); img.alt = f.name; img.loading = 'lazy';
+      li.appendChild(img);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.title = f.name;
+    meta.textContent = f.name + ' (' + Math.round(f.size / 1024) + ' KB)';
+    li.appendChild(meta);
+    const mv = document.createElement('div');
+    mv.className = 'move';
+    const prev = document.createElement('button');
+    prev.textContent = '← 前移';
+    prev.onclick = () => { if (i > 0) { [files[i-1], files[i]] = [files[i], files[i-1]]; renderFiles(); } };
+    const next = document.createElement('button');
+    next.textContent = '后移 →';
+    next.onclick = () => { if (i < files.length - 1) { [files[i+1], files[i]] = [files[i], files[i+1]]; renderFiles(); } };
+    mv.appendChild(prev); mv.appendChild(next);
+    li.appendChild(mv);
+    const rm = document.createElement('button');
+    rm.className = 'rm'; rm.textContent = '×'; rm.title = '移除';
+    rm.onclick = () => {
+      if (files[i]._url) URL.revokeObjectURL(files[i]._url);
+      files.splice(i, 1); renderFiles();
+    };
+    li.appendChild(rm);
+    filelist.appendChild(li);
+  });
+}
+async function hashFile(f) {
+  const buf = await f.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+async function addFiles(list) {
+  const seen = new Set(files.map(f => f._hash || fileKey(f)));
+  let dup = 0;
+  for (const f of list) {
+    let h = '';
+    try { h = await hashFile(f); } catch (e) { h = ''; }
+    const key = h || fileKey(f);
+    if (seen.has(key)) { dup++; continue; }
+    seen.add(key);
+    f._hash = key;
+    files.push(f);
+  }
+  dupHint.textContent = dup ? ('已自动跳过 ' + dup + ' 张重复图片（按内容去重）') : '';
+  renderFiles();
+}
+drop.onclick = () => picker.click();
+picker.onchange = () => { addFiles(picker.files); picker.value = ''; };
+['dragenter', 'dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', ev => addFiles(ev.dataTransfer.files));
+
+// 选项记忆：刷新、重启后端都不丢（存在服务端 .prefs.json）
+const deckName = document.getElementById('deckName');
+const ocrToken = document.getElementById('ocrToken');
+const detectTables = document.getElementById('detectTables');
+const textOnly = document.getElementById('textOnly');
+fetch('/api/prefs').then(r => r.json()).then(p => {
+  if (p.deck_name) deckName.value = p.deck_name;
+  if (p.ocr_token) ocrToken.value = p.ocr_token;
+  detectTables.checked = !!p.detect_tables;
+  textOnly.checked = !!p.text_only;
+});
+let prefsTimer = null;
+function savePrefs() {
+  clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(() => {
+    fetch('/api/prefs', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deck_name: deckName.value.trim(),
+        ocr_token: ocrToken.value.trim(),
+        detect_tables: detectTables.checked,
+        text_only: textOnly.checked,
+      }) });
+  }, 500);
+}
+[deckName, ocrToken].forEach(el => el.addEventListener('input', savePrefs));
+[detectTables, textOnly].forEach(el => el.addEventListener('change', savePrefs));
+
+// 与后端交互
+async function reveal(jobId, kind, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/reveal', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: jobId, kind }) });
+    const c = await r.json();
+    if (!r.ok) alert('打开失败：' + (c.error || '未知错误'));
+  } catch (e) { alert('打开失败：' + e.message); }
+  finally { if (btn) btn.disabled = false; }
+}
+async function saveAsFor(jobId, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/save-as', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: jobId }) });
+    const c = await r.json();
+    if (c.canceled) return null;
+    if (!r.ok) { alert('保存失败：' + (c.error || '未知错误')); return null; }
+    refreshJobs();
+    return c;
+  } catch (e) { alert('保存失败：' + e.message); return null; }
+  finally { if (btn) btn.disabled = false; }
+}
+function mkBtn(text, cls, onclick) {
+  const b = document.createElement('button');
+  b.className = cls; b.textContent = text; b.onclick = onclick;
+  return b;
+}
+
+// 最近任务：每条任务都能打开 PPT 文件夹 / 原图片文件夹
+async function refreshJobs() {
+  const r = await fetch('/api/jobs');
+  const data = await r.json();
+  const ul = document.getElementById('jobs');
+  ul.innerHTML = '';
+  const label = { queued: '排队中', running: '转换中', done: '已完成', error: '失败' };
+  if (!data.jobs.length) { ul.innerHTML = '<li style="color:#999">暂无</li>'; return; }
+  for (const j of data.jobs) {
+    const li = document.createElement('li');
+    const head = document.createElement('div');
+    head.textContent = j.created + ' · ' + j.name + ' · ' + (label[j.status] || j.status);
+    if (j.error) {
+      const err = document.createElement('span');
+      err.style.color = '#b91c1c';
+      err.textContent = ' · ' + j.error;
+      head.appendChild(err);
+    }
+    li.appendChild(head);
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    if (j.status === 'done') {
+      if (j.saved) {
+        actions.appendChild(mkBtn('打开 PPT 文件夹' + (j.saved_count > 1 ? '（已保存 ' + j.saved_count + ' 次）' : ''),
+          'ghost', (e) => reveal(j.id, 'ppt', e.currentTarget)));
+        actions.appendChild(mkBtn('另存为…', 'ghost',
+          async (e) => { const c = await saveAsFor(j.id, e.currentTarget); if (c) alert('已保存到：' + c.saved_path); }));
+      } else {
+        actions.appendChild(mkBtn('保存 PPTX 到…', 'ghost',
+          async (e) => { const c = await saveAsFor(j.id, e.currentTarget); if (c) alert('已保存到：' + c.saved_path); }));
+      }
+    }
+    if (j.status !== 'queued' && j.status !== 'running') {
+      actions.appendChild(mkBtn('打开图片文件夹', 'ghost',
+        (e) => reveal(j.id, 'src', e.currentTarget)));
+    }
+    li.appendChild(actions);
+    ul.appendChild(li);
+  }
+}
+refreshJobs(); setInterval(refreshJobs, 8000);
+
+// 转换
+const go = document.getElementById('go');
+const status = document.getElementById('status');
+const bar = document.getElementById('bar');
+const barFill = document.getElementById('barFill');
+const barLabel = document.getElementById('barLabel');
+const logBox = document.getElementById('log');
+const dlBox = document.getElementById('download');
+const saveAsBtn = document.getElementById('saveAsBtn');
+const openPptBtn = document.getElementById('openPptBtn');
+let timer = null;
+let activeJobId = null;
+
+function setProgress(p) {
+  if (!p) return;
+  bar.style.display = 'block';
+  barLabel.style.display = 'block';
+  barFill.style.width = Math.min(100, Math.max(0, p.percent)) + '%';
+  barLabel.textContent = '总体进度约 ' + p.percent + '% · ' + (p.label || '');
+}
+
+saveAsBtn.onclick = async () => {
+  if (!activeJobId) return;
+  const c = await saveAsFor(activeJobId, saveAsBtn);
+  if (!c) return;
+  status.className = 'done';
+  status.textContent = '已保存到：' + c.saved_path;
+  saveAsBtn.style.display = 'none';
+  openPptBtn.style.display = 'inline-block';
+};
+openPptBtn.onclick = (e) => {
+  if (activeJobId) reveal(activeJobId, 'ppt', e.currentTarget);
+};
+
+go.onclick = async () => {
+  if (!files.length) { status.className = 'error'; status.textContent = '请先拖入至少一张图片'; return; }
+  const fd = new FormData();
+  files.forEach(f => fd.append('images', f, f.name));
+  fd.append('name', deckName.value.trim());
+  fd.append('ocr_token', ocrToken.value.trim());
+  if (detectTables.checked) fd.append('detect_tables', 'on');
+  if (textOnly.checked) fd.append('mode', 'text-only');
+  go.disabled = true;
+  dlBox.style.display = 'none';
+  saveAsBtn.style.display = 'inline-block';
+  openPptBtn.style.display = 'none';
+  status.className = ''; status.textContent = '上传中…';
+  setProgress({ percent: 1, label: '上传中' });
+  logBox.style.display = 'block'; logBox.textContent = '';
+  let jobId;
+  try {
+    const r = await fetch('/api/convert', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || '上传失败');
+    jobId = data.job_id;
+    activeJobId = jobId;
+  } catch (e) { status.className = 'error'; status.textContent = '上传失败：' + e.message; go.disabled = false; return; }
+  status.textContent = '转换中，总体进度见上方进度条，详细日志在下方…';
+  clearInterval(timer);
+  timer = setInterval(async () => {
+    const r = await fetch('/api/jobs/' + jobId);
+    const j = await r.json();
+    logBox.textContent = (j.log || []).join('\n');
+    logBox.scrollTop = logBox.scrollHeight;
+    setProgress(j.progress);
+    if (j.status === 'done') {
+      clearInterval(timer); go.disabled = false;
+      setProgress({ percent: 100, label: '转换完成' });
+      status.className = 'done';
+      status.textContent = '全部转换成功！点“保存 PPTX 到…”选择保存位置。';
+      dlBox.style.display = 'flex';
+      clearFiles();          // 成功后清空图片预览
+      refreshJobs();
+    } else if (j.status === 'error') {
+      clearInterval(timer); go.disabled = false;
+      status.className = 'error';
+      status.textContent = '失败：' + (j.error || '未知错误') + '（图片已保留，可重试）';
+      refreshJobs();
+    }
+  }, 1500);
+};
+</script>
+</body>
+</html>

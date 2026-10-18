@@ -61,6 +61,10 @@ class RemoteOCRError(RuntimeError):
     """Any failure that makes the remote backend unusable for this run."""
 
 
+class PageCountMismatch(RemoteOCRError):
+    """The service returned fewer/more pages than submitted."""
+
+
 # --------------------------------------------------------------------------
 # token / HTTP plumbing
 # --------------------------------------------------------------------------
@@ -341,59 +345,91 @@ DEFAULT_PAYLOAD = {
 }
 
 
+def result_to_items(result: dict, page_paths: list[Path],
+                    min_conf: float) -> list[list[dict]]:
+    """Service payload → one item list per page, in submitted order."""
+    payloads = ocr_results(result)
+    if len(payloads) != len(page_paths):
+        raise PageCountMismatch(
+            f"OCR returned {len(payloads)} pages for {len(page_paths)} "
+            f"submitted pages; refusing to guess the mapping"
+        )
+    data_info = result.get("result", {}).get("dataInfo", {})
+    out: list[list[dict]] = []
+    for index, (path, pruned) in enumerate(zip(page_paths, payloads)):
+        width, height = source_size(path)
+        ocr_w, ocr_h = _page_dims(data_info, index)
+        out.append(extract_items(
+            pruned, min_conf,
+            scale_x=width / ocr_w if ocr_w else 1.0,
+            scale_y=height / ocr_h if ocr_h else 1.0,
+            bounds=(width, height),
+        ))
+    return out
+
+
 def run_pages(page_paths: list[Path], *, token: str, model: str = DEFAULT_MODEL,
               min_conf: float = 0.5, timeout: float = DEFAULT_TIMEOUT,
-              payload: dict | None = None) -> list[list[dict]]:
+              payload: dict | None = None,
+              batch_retries: int = 1) -> list[list[dict]]:
     """OCR every page with ONE job; return one item list per page.
 
     A single page is uploaded as an image; two or more are packed into a
     multi-page PDF so the job count stays at one regardless of page
     count.
+
+    The service occasionally drops a page from a multi-page result (e.g.
+    4 inputs return 3 payloads). Rather than guessing the mapping —
+    which would attach one slide's text to another — retry the whole
+    batch, then fall back to one job per page so a single flaky page
+    cannot sink the others.
     """
     if not page_paths:
         return []
     session = _session(token)
     options = dict(payload or DEFAULT_PAYLOAD)
 
-    upload = page_paths[0]
-    temp_pdf: Path | None = None
+    def submit(paths: list[Path]) -> list[list[dict]]:
+        upload = paths[0]
+        temp_pdf: Path | None = None
+        try:
+            if len(paths) > 1:
+                fd, name = tempfile.mkstemp(prefix="deckweaver_ocr_", suffix=".pdf")
+                os.close(fd)
+                temp_pdf = Path(name)
+                build_pdf(paths, temp_pdf)
+                upload = temp_pdf
+
+            job_id = submit_job(session, upload, model, options)
+            print(f"  remote job {job_id} ({len(paths)} page(s), "
+                  f"model={model})", flush=True)
+            status = poll_job(session, job_id, timeout)
+            result = fetch_result(session, status["resultUrl"]["jsonUrl"])
+        finally:
+            if temp_pdf is not None:
+                temp_pdf.unlink(missing_ok=True)
+        return result_to_items(result, paths, min_conf=min_conf)
+
     try:
-        if len(page_paths) > 1:
-            fd, name = tempfile.mkstemp(prefix="deckweaver_ocr_", suffix=".pdf")
-            os.close(fd)
-            temp_pdf = Path(name)
-            build_pdf(page_paths, temp_pdf)
-            upload = temp_pdf
-
-        job_id = submit_job(session, upload, model, options)
-        print(f"  remote job {job_id} ({len(page_paths)} page(s), "
-              f"model={model})", flush=True)
-        status = poll_job(session, job_id, timeout)
-        result = fetch_result(session, status["resultUrl"]["jsonUrl"])
-    finally:
-        if temp_pdf is not None:
-            temp_pdf.unlink(missing_ok=True)
-
-    payloads = ocr_results(result)
-    if len(payloads) != len(page_paths):
-        raise RemoteOCRError(
-            f"OCR returned {len(payloads)} pages for {len(page_paths)} "
-            f"submitted pages; refusing to guess the mapping"
-        )
-
-    data_info = result.get("result", {}).get("dataInfo", {})
-    out: list[list[dict]] = []
-    for index, (path, pruned) in enumerate(zip(page_paths, payloads)):
-        width, height = source_size(path)
-        ocr_w, ocr_h = _page_dims(data_info, index)
-        items = extract_items(
-            pruned, min_conf,
-            scale_x=width / ocr_w if ocr_w else 1.0,
-            scale_y=height / ocr_h if ocr_h else 1.0,
-            bounds=(width, height),
-        )
-        out.append(items)
-    return out
+        return submit(page_paths)
+    except PageCountMismatch as exc:
+        if len(page_paths) == 1:
+            raise
+        print(f"  WARN: {exc} — retrying the batch", flush=True)
+        for _ in range(max(0, batch_retries)):
+            try:
+                return submit(page_paths)
+            except PageCountMismatch as retry_exc:
+                print(f"  WARN: {retry_exc} — retry failed", flush=True)
+        print("  WARN: batch still mismatched — one job per page", flush=True)
+        out: list[list[dict]] = []
+        for path in page_paths:
+            try:
+                out.extend(submit([path]))
+            except PageCountMismatch as single_exc:
+                raise RemoteOCRError(
+                    f"OCR failed for {path.name}: {single_exc}")
+        return out
 
 
 def run_crop(image, *, token: str, model: str = DEFAULT_MODEL,

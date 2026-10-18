@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest import mock
 import sys
 import tempfile
 
@@ -147,6 +148,45 @@ class ResponseShapeTests(unittest.TestCase):
         self.assertEqual(
             ocr_remote._page_dims({"width": 100, "height": 50}, 3),
             (100.0, 50.0))
+
+
+class PageMismatchRetryTests(unittest.TestCase):
+    def _result(self, pages: int) -> dict:
+        return {
+            "result": {
+                "ocrResults": [{"prunedResult": {
+                    "rec_texts": [], "rec_boxes": [], "rec_scores": []}}
+                for _ in range(pages)],
+                "dataInfo": {"width": 10, "height": 10},
+            }
+        }
+
+    def test_batch_mismatch_falls_back_to_single_page_jobs(self) -> None:
+        paths = [Path(f"p{i}.png") for i in range(3)]
+        batch = self._result(2)
+        singles = [self._result(1) for _ in paths]
+        with mock.patch.object(ocr_remote, "submit_job", return_value="jid"), \
+             mock.patch.object(ocr_remote, "poll_job",
+                               return_value={"resultUrl": {"jsonUrl": "u"}}), \
+             mock.patch.object(ocr_remote, "fetch_result",
+                               side_effect=[batch] + singles), \
+             mock.patch.object(ocr_remote, "source_size",
+                               return_value=(10, 10)), \
+             mock.patch.object(ocr_remote, "build_pdf"):
+            out = ocr_remote.run_pages(paths, token="t", batch_retries=0)
+        self.assertEqual(len(out), 3)
+        self.assertTrue(all(isinstance(items, list) for items in out))
+
+    def test_single_page_mismatch_still_raises(self) -> None:
+        with mock.patch.object(ocr_remote, "submit_job", return_value="jid"), \
+             mock.patch.object(ocr_remote, "poll_job",
+                               return_value={"resultUrl": {"jsonUrl": "u"}}), \
+             mock.patch.object(ocr_remote, "fetch_result",
+                               return_value=self._result(0)), \
+             mock.patch.object(ocr_remote, "source_size",
+                               return_value=(10, 10)):
+            with self.assertRaises(ocr_remote.RemoteOCRError):
+                ocr_remote.run_pages([Path("p.png")], token="t")
 
 
 class TokenTests(unittest.TestCase):

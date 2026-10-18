@@ -1,0 +1,10 @@
+{
+  "name": "image2ppt-web",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Image2PPT 本地 Web 服务：拖图批量转可编辑 PPT",
+  "scripts": {
+    "prestart": "node scripts/ensure-deps.mjs",
+    "start": "python3 server.py"
+  }
+}
