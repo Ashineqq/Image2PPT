@@ -19,8 +19,8 @@ box per line. Keep the default.
 Single-page mode (writes JSON to stdout):
     python scripts/ocr/ocr_remote.py slide.jpg > ocr.json
 
-Batch mode (ONE job for every page — the pages are packed into a
-multi-page PDF and uploaded together, which is what makes this fast):
+Batch mode (pages are packed into multi-page PDFs and uploaded
+MAX_PAGES_PER_JOB at a time, which is what makes this fast):
     python scripts/ocr/ocr_remote.py --batch \
         page_01.png  out/page_01.ocr.json \
         page_02.webp out/page_02.ocr.json \
@@ -55,6 +55,12 @@ DEFAULT_TIMEOUT = 900
 POLL_INTERVAL = 3.0
 CONFIG_PATH = Path.home() / ".editppt" / "config.yaml"
 MAX_HTTP_ATTEMPTS = 6
+
+# The service processes at most this many pages per job and silently drops
+# the rest: a 5-page PDF comes back with `numPages: 3` and no error, and a
+# 4-page run returns 3 pages every time. Multi-page uploads are therefore
+# split into batches of this size.
+MAX_PAGES_PER_JOB = 3
 
 
 class RemoteOCRError(RuntimeError):
@@ -371,23 +377,26 @@ def result_to_items(result: dict, page_paths: list[Path],
 def run_pages(page_paths: list[Path], *, token: str, model: str = DEFAULT_MODEL,
               min_conf: float = 0.5, timeout: float = DEFAULT_TIMEOUT,
               payload: dict | None = None,
-              batch_retries: int = 1) -> list[list[dict]]:
-    """OCR every page with ONE job; return one item list per page.
+              batch_retries: int = 1,
+              batch_size: int = MAX_PAGES_PER_JOB) -> list[list[dict]]:
+    """OCR every page, in batches of at most `batch_size`; one item list per page.
 
-    A single page is uploaded as an image; two or more are packed into a
-    multi-page PDF so the job count stays at one regardless of page
-    count.
+    Pages go up as multi-page PDFs, `batch_size` at a time, because the
+    service silently truncates a job to its first three pages — a 5-page
+    upload comes back with `numPages: 3` and no error, which is
+    indistinguishable from a mysterious mapping failure if you trust the
+    submission. Batches keep the input inside that limit and preserve page
+    order.
 
-    The service occasionally drops a page from a multi-page result (e.g.
-    4 inputs return 3 payloads). Rather than guessing the mapping —
-    which would attach one slide's text to another — retry the whole
-    batch, then fall back to one job per page so a single flaky page
-    cannot sink the others.
+    Should a batch still come back with the wrong page count, the mapping
+    cannot be guessed — one slide's text would land on another — so the
+    batch is retried and then split into one job per page.
     """
     if not page_paths:
         return []
     session = _session(token)
     options = dict(payload or DEFAULT_PAYLOAD)
+    size = max(1, int(batch_size))
 
     def submit(paths: list[Path]) -> list[list[dict]]:
         upload = paths[0]
@@ -410,26 +419,36 @@ def run_pages(page_paths: list[Path], *, token: str, model: str = DEFAULT_MODEL,
                 temp_pdf.unlink(missing_ok=True)
         return result_to_items(result, paths, min_conf=min_conf)
 
-    try:
-        return submit(page_paths)
-    except PageCountMismatch as exc:
-        if len(page_paths) == 1:
-            raise
-        print(f"  WARN: {exc} — retrying the batch", flush=True)
-        for _ in range(max(0, batch_retries)):
-            try:
-                return submit(page_paths)
-            except PageCountMismatch as retry_exc:
-                print(f"  WARN: {retry_exc} — retry failed", flush=True)
-        print("  WARN: batch still mismatched — one job per page", flush=True)
-        out: list[list[dict]] = []
-        for path in page_paths:
-            try:
-                out.extend(submit([path]))
-            except PageCountMismatch as single_exc:
-                raise RemoteOCRError(
-                    f"OCR failed for {path.name}: {single_exc}")
-        return out
+    def run_batch(paths: list[Path]) -> list[list[dict]]:
+        try:
+            return submit(paths)
+        except PageCountMismatch as exc:
+            if len(paths) == 1:
+                raise
+            print(f"  WARN: {exc} — retrying the batch", flush=True)
+            for _ in range(max(0, batch_retries)):
+                try:
+                    return submit(paths)
+                except PageCountMismatch as retry_exc:
+                    print(f"  WARN: {retry_exc} — retry failed", flush=True)
+            print("  WARN: batch still mismatched — one job per page", flush=True)
+            out: list[list[dict]] = []
+            for path in paths:
+                try:
+                    out.extend(submit([path]))
+                except PageCountMismatch as single_exc:
+                    raise RemoteOCRError(
+                        f"OCR failed for {path.name}: {single_exc}")
+            return out
+
+    batches = [page_paths[i:i + size] for i in range(0, len(page_paths), size)]
+    out: list[list[dict]] = []
+    for index, batch in enumerate(batches, 1):
+        if len(batches) > 1:
+            print(f"  batch {index}/{len(batches)}: {len(batch)} page(s)",
+                  flush=True)
+        out.extend(run_batch(batch))
+    return out
 
 
 def run_crop(image, *, token: str, model: str = DEFAULT_MODEL,

@@ -189,6 +189,74 @@ class PageMismatchRetryTests(unittest.TestCase):
                 ocr_remote.run_pages([Path("p.png")], token="t")
 
 
+class BatchSizeTests(unittest.TestCase):
+    """The service caps a job at MAX_PAGES_PER_JOB pages and silently
+    drops the rest, so multi-page input has to be split client-side."""
+
+    def _result(self, texts) -> dict:
+        return {
+            "result": {
+                "ocrResults": [{"prunedResult": {
+                    "rec_texts": [t], "rec_boxes": [[0, 0, 10, 10]],
+                    "rec_scores": [1.0]}} for t in texts],
+                "dataInfo": {"width": 10, "height": 10},
+            }
+        }
+
+    def _run(self, paths, results, seen):
+        def fake_build(page_paths, out_path):
+            seen.append(len(page_paths))
+            out_path.write_bytes(b"%PDF-1.4\n")
+
+        with mock.patch.object(ocr_remote, "submit_job", return_value="jid"), \
+             mock.patch.object(ocr_remote, "poll_job",
+                               return_value={"resultUrl": {"jsonUrl": "u"}}), \
+             mock.patch.object(ocr_remote, "fetch_result",
+                               side_effect=results), \
+             mock.patch.object(ocr_remote, "source_size",
+                               return_value=(10, 10)), \
+             mock.patch.object(ocr_remote, "build_pdf",
+                               side_effect=fake_build):
+            return ocr_remote.run_pages(paths, token="t")
+
+    def test_caps_pdf_batches_at_the_service_limit(self) -> None:
+        """7 pages → 3+3+1, and the page order survives the split."""
+        paths = [Path(f"p{i}.png") for i in range(7)]
+        results = [self._result(list("abc")), self._result(list("def")),
+                   self._result(list("g"))]
+        seen: list[int] = []
+        out = self._run(paths, results, seen)
+        self.assertEqual(seen, [3, 3])          # PDF batches are capped
+        self.assertEqual(len(out), 7)
+        self.assertEqual([items[0]["text"] for items in out],
+                         list("abcdefg"))       # order preserved
+
+    def test_a_batch_at_the_limit_is_a_single_job(self) -> None:
+        paths = [Path(f"p{i}.png") for i in range(3)]
+        seen: list[int] = []
+        out = self._run(paths, [self._result(list("abc"))], seen)
+        self.assertEqual(seen, [3])
+        self.assertEqual([items[0]["text"] for items in out], list("abc"))
+
+    def test_custom_batch_size_is_honoured(self) -> None:
+        paths = [Path(f"p{i}.png") for i in range(5)]
+        results = [self._result(list("ab")), self._result(list("cd")),
+                   self._result(list("e"))]
+        seen: list[int] = []
+        with mock.patch.object(ocr_remote, "submit_job", return_value="jid"), \
+             mock.patch.object(ocr_remote, "poll_job",
+                               return_value={"resultUrl": {"jsonUrl": "u"}}), \
+             mock.patch.object(ocr_remote, "fetch_result",
+                               side_effect=results), \
+             mock.patch.object(ocr_remote, "source_size",
+                               return_value=(10, 10)), \
+             mock.patch.object(ocr_remote, "build_pdf",
+                               side_effect=lambda p, o: seen.append(len(p))):
+            out = ocr_remote.run_pages(paths, token="t", batch_size=2)
+        self.assertEqual(seen, [2, 2])
+        self.assertEqual(len(out), 5)
+
+
 class TokenTests(unittest.TestCase):
     def test_explicit_token_wins(self) -> None:
         self.assertEqual(ocr_remote.resolve_token("explicit"), "explicit")

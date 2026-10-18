@@ -99,9 +99,11 @@ preview-based text position calibration, QA inspection, and preview rendering.
 
 Text recognition runs on the Baidu AI Studio PaddleOCR service
 (`scripts/ocr/ocr_remote.py`): PP-OCRv5, no local weights, no local CPU,
-and no `paddleocr` / `paddlepaddle` to install. All pages travel as ONE job
-(multi-page inputs are packed into a single PDF), so the cost does not grow
-per page.
+and no `paddleocr` / `paddlepaddle` to install. Multi-page inputs are
+packed into multi-page PDFs and uploaded in batches of at most 3 pages:
+the service handles only the first 3 pages of a larger job and reports no
+error, so `run_pages` splits the input itself. The cost still does not
+grow per page.
 
 A token is required. It comes from `--ocr-token`, then
 `$PADDLE_OCR_TOKEN`, then `PADDLE_OCR_TOKEN` in `~/.editppt/config.yaml`;

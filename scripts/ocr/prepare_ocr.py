@@ -2,8 +2,9 @@
 """Single-command OCR preparation with confidence tiering.
 
 Runs PP-OCRv5 over every supported `page_NN.*` image in --source-dir,
-always through the Baidu AI Studio cloud service (one job for the whole
-batch). For each page:
+always through the Baidu AI Studio cloud service (pages go up in batches
+of at most `ocr_remote.MAX_PAGES_PER_JOB`, the service's per-job limit).
+For each page:
 
   1. Runs PP-OCRv5 to get baseline text + bbox + confidence
   2. Builds a review packet for entries with conf < --threshold (default 0.95)
@@ -161,10 +162,11 @@ def remote_token(args: argparse.Namespace) -> str:
 
 def run_ocr_remote(pairs: list[tuple[Path, Path]], args: argparse.Namespace,
                    token: str) -> list[int]:
-    """OCR every page through ONE cloud job; return per-page item counts.
+    """OCR every page in cloud batches; return per-page item counts.
 
-    Pages are packed into a multi-page PDF and uploaded together, so the
-    per-page cost is upload-plus-poll once, not once per page.
+    Pages are packed into multi-page PDFs and uploaded a few at a time
+    (the service caps a job at `MAX_PAGES_PER_JOB` pages), so the
+    per-page cost is a fraction of an upload-plus-poll, not a full one.
     """
     counts = [0] * len(pairs)
     todo = [(i, img, out) for i, (img, out) in enumerate(pairs)
@@ -174,8 +176,10 @@ def run_ocr_remote(pairs: list[tuple[Path, Path]], args: argparse.Namespace,
             print(f"  SKIP missing: {img}", file=sys.stderr)
     if not todo:
         return counts
-    print(f"  submitting {len(todo)} page(s) to {args.ocr_model} "
-          f"in one job", flush=True)
+    per_job = max(1, ocr_remote.MAX_PAGES_PER_JOB)
+    jobs = (len(todo) + per_job - 1) // per_job
+    print(f"  submitting {len(todo)} page(s) to {args.ocr_model} in "
+          f"{jobs} job(s) of at most {per_job} page(s)", flush=True)
     try:
         results = ocr_remote.run_pages(
             [img for _, img, _ in todo], token=token, model=args.ocr_model,

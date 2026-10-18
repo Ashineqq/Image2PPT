@@ -147,9 +147,11 @@ If `build_deck.py` reports uncertain OCR entries, open `ocr/page_NN.ocr_review.a
 
 Text recognition (PP-OCRv5) runs on the Baidu AI Studio cloud service, so
 there are no local weights to download, no local CPU cost, and no
-`paddleocr` / `paddlepaddle` to install. The whole input goes up as ONE job
-(multi-page inputs are packed into a single PDF), so many pages cost far
-less than a per-page local loop would.
+`paddleocr` / `paddlepaddle` to install. Multi-page inputs are packed into
+multi-page PDFs and uploaded in batches of at most 3 pages — the service
+processes only the first 3 pages of a larger job and reports no error, so
+the client splits the work itself. Many pages still cost far less than a
+per-page local loop would.
 
 Pages are uploaded to Baidu AI Studio — do not use this on confidential
 material.
